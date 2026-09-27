@@ -20,9 +20,20 @@ WORK="$(mktemp -d)"
 JAR="$WORK/cookies.txt"
 PASS=0
 FAIL=0
+SMOKE_PID=""
 BODY_FILE="$WORK/body.json"
 STATUS_FILE="$WORK/status.txt"
 touch "$BODY_FILE" "$STATUS_FILE"
+
+# The API started in step 0 is a child of this shell. Without releasing it the
+# output pipe stays open after the summary prints, so a caller that reads the
+# pipe (`... | tail`) blocks forever on a run that has already finished.
+release_server() {
+  [ -n "$SMOKE_PID" ] || return 0
+  kill "$SMOKE_PID" 2>/dev/null || true
+  SMOKE_PID=""
+}
+trap release_server EXIT
 
 ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
@@ -98,7 +109,12 @@ if [ "${SMOKE_NO_RESTART:-0}" != "1" ]; then
     # `start` runs dist/server.js, so the build has to be current or the smoke
     # would test stale code. Rebuilding is cheap next to a failed run.
     if [ "${SMOKE_NO_BUILD:-0}" != "1" ]; then
-      if pnpm --filter @synzo/api run build > "$WORK/build.log" 2>&1; then
+      # The workspace packages are built first. `start` executes compiled
+      # JavaScript and Node resolves @synzo/* through each package's `exports`
+      # to dist/; building only the API leaves a stale packages/*/dist and the
+      # start below dies with ERR_MODULE_NOT_FOUND.
+      if pnpm run build:packages > "$WORK/build.log" 2>&1 &&
+         pnpm --filter @synzo/api run build >> "$WORK/build.log" 2>&1; then
         ok "API build is current"
       else
         bad "API build failed"; sed -n '1,20p' "$WORK/build.log"
@@ -113,6 +129,7 @@ if [ "${SMOKE_NO_RESTART:-0}" != "1" ]; then
       EXISTING=$(lsof -ti "tcp:$SMOKE_PORT" 2>/dev/null || true)
       [ -n "$EXISTING" ] && kill $EXISTING 2>/dev/null && ok "stopped existing process on $SMOKE_PORT"
       ( cd "$ROOT_DIR" && nohup pnpm --filter @synzo/api run start > "$WORK/api.log" 2>&1 & echo $! > "$WORK/api.pid" )
+      SMOKE_PID="$(cat "$WORK/api.pid" 2>/dev/null || true)"
       # /health is the liveness probe; it deliberately touches no dependency,
       # so a poll succeeding means the process is actually serving requests.
       HEALTHY=0
@@ -127,6 +144,7 @@ if [ "${SMOKE_NO_RESTART:-0}" != "1" ]; then
         sed -n '1,20p' "$WORK/api.log" | sed 's/^/    | /'
         printf '  \033[31mFAIL\033[0m stopping: log kept at %s\n' "$WORK/api.log"
         printf '\n\033[1m================ %d passed, %d failed ================\033[0m\n' "$PASS" "$((FAIL+1))"
+        release_server
         exit 1
       fi
     else
@@ -436,16 +454,24 @@ step "18c. Stream ends cleanly even when the client stops reading"
 # gone away. curl is told to stop after the first frame; the request still has
 # to terminate rather than hang. `head` exiting early can send the pipeline a
 # SIGPIPE (exit 141), which is a normal short-read, not a hang — so 141 is
-# treated as success and only a real timeout (124) is a failure.
+# treated as success and only a real timeout is a failure.
+#
+# `timeout` is GNU coreutils and does not exist on macOS, which made this step
+# exit 127 and silently "pass" the hang check while receiving nothing at all.
+# Curl's own --max-time is portable and enforces the same bound.
 set -o pipefail
-OUT=$(timeout 30 curl -sS -N -X POST "$BASE/v1/chat/completions" \
+OUT=$(curl -sS -N --max-time 30 -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $CONC_KEY" -H 'Content-Type: application/json' \
   -d '{"model":"space-bunny-free","stream":true,"messages":[{"role":"user","content":"Count 1 to 20."}]}' \
   2>/dev/null | head -c 2000)
 RC=$?
 set +o pipefail
-if [ $RC -eq 124 ]; then
+# 124 is GNU timeout's code; curl's own timeout is 28. A SIGPIPE short read
+# (141) means the stream was cut cleanly, which is exactly what is asserted.
+if [ $RC -eq 124 ] || [ $RC -eq 28 ]; then
   bad "stream hung after the client stopped reading"
+elif [ $RC -eq 127 ]; then
+  bad "required tool missing (exit 127) - this step did not actually run"
 else
   ok "stream terminated after client disconnect (no hang, rc=$RC)"
 fi
