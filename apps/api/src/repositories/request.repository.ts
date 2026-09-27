@@ -230,16 +230,22 @@ export class RequestRepository {
 
   /** Per-day series for the usage charts (§25, §27). */
   async dailySeries(userId: string, from: Date, to: Date) {
-    return this.db
+    // Column names are mapped to the published `UsagePoint` shape here rather
+    // than leaking the rollup's own names: the charts key off `date` and the
+    // dashboard's types declare `date`, so a raw `day` key silently blanks the
+    // x-axis. `errors` is the field the contract promises; the column sums
+    // failures.
+    const rows = await this.db
       .select({
-        day: usageDaily.day,
+        date: usageDaily.day,
         requests: sql<number>`sum(${usageDaily.requests})::int`,
         successful: sql<number>`sum(${usageDaily.successfulRequests})::int`,
         failed: sql<number>`sum(${usageDaily.failedRequests})::int`,
         promptTokens: sql<number>`sum(${usageDaily.promptTokens})::int`,
         completionTokens: sql<number>`sum(${usageDaily.completionTokens})::int`,
         totalTokens: sql<number>`sum(${usageDaily.totalTokens})::int`,
-        avgLatency: sql<number>`coalesce(
+        errors: sql<number>`sum(${usageDaily.failedRequests})::int`,
+        avgLatencyMs: sql<number>`coalesce(
           (sum(${usageDaily.totalLatencyMs}) / nullif(sum(${usageDaily.requests}), 0))::int, 0
         )`,
       })
@@ -253,11 +259,17 @@ export class RequestRepository {
       )
       .groupBy(usageDaily.day)
       .orderBy(usageDaily.day);
+
+    return rows;
   }
 
   /** Usage split by model, for the "model usage" chart. */
   async usageByModel(userId: string, from: Date, to: Date) {
-    return this.db
+    // The rollup is returned with the JSON-facing names the dashboard and the
+    // published types expect, and `upstream_cost` is parsed to a number. It
+    // reaches the browser as a STRING otherwise, and the usage page then dies
+    // on `upstreamCost.toFixed`, taking the whole route with it.
+    const rows = await this.db
       .select({
         model: usageDaily.modelName,
         requests: sql<number>`sum(${usageDaily.requests})::int`,
@@ -274,5 +286,7 @@ export class RequestRepository {
       )
       .groupBy(usageDaily.modelName)
       .orderBy(desc(sql`sum(${usageDaily.requests})`));
+
+    return rows.map((r) => ({ ...r, upstreamCost: Number(r.upstreamCost) }));
   }
 }

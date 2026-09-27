@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
 import type { Database } from '@synzo/database';
 import { customerLimits, users, type CustomerLimits } from '@synzo/database';
 import type { AppConfig } from '@synzo/config';
@@ -117,6 +117,52 @@ export class UserRepository {
 
   async countCustomers(): Promise<number> {
     const rows = await this.db.select({ n: sql<number>`count(*)::int` }).from(users);
+    return rows[0]?.n ?? 0;
+  }
+
+  /**
+   * Admin search predicate over the customer table.
+   *
+   * Matching is case-insensitive across BOTH name and email, because the two
+   * things an admin actually looks up are "what is this person called" and
+   * "which address did they sign up with", and a search that only covers one
+   * of them fails half the time.
+   *
+   * The term is bound as a query parameter, never interpolated into the SQL
+   * text, and LIKE metacharacters inside it are escaped. Without that, a search
+   * for "100%" or "a_b" silently becomes a wildcard that matches most of the
+   * table. The second backslash in the ESCAPE clause is a TypeScript escape,
+   * so the database receives a single backslash as the escape character.
+   */
+  private customerSearchFilter(term: string): SQL | undefined {
+    const trimmed = term.trim();
+    if (!trimmed) return undefined;
+    const escaped = trimmed.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const pattern = `%${escaped}%`;
+    return sql`(${users.name} ILIKE ${pattern} ESCAPE '\\' OR ${users.email} ILIKE ${pattern} ESCAPE '\\')`;
+  }
+
+  /**
+   * Paginated customer list, optionally narrowed by `term`. An empty term is
+   * the unfiltered list, so the default admin view keeps its exact current
+   * behaviour and query plan.
+   */
+  async searchCustomers(term: string, limit = 100, offset = 0) {
+    const base = this.db.select().from(users);
+    const filtered = this.customerSearchFilter(term);
+    const query = filtered ? base.where(filtered) : base;
+    return query.orderBy(sql`${users.createdAt} desc`).limit(limit).offset(offset);
+  }
+
+  /**
+   * Row count for the same filter. Reported alongside the unfiltered total so
+   * the dashboard can show "3 of 128" and the admin never has to count rows by
+   * eye to tell a short result set from an empty one.
+   */
+  async countCustomersMatching(term: string): Promise<number> {
+    const base = this.db.select({ n: sql<number>`count(*)::int` }).from(users);
+    const filtered = this.customerSearchFilter(term);
+    const rows = filtered ? await base.where(filtered) : await base;
     return rows[0]?.n ?? 0;
   }
 

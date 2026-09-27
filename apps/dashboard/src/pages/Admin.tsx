@@ -146,6 +146,71 @@ function ProviderHealthCard({ health, isLoading }: { health: ProviderHealth[] | 
   );
 }
 
+/**
+ * Name-or-email search for the customer table.
+ *
+ * The label names both fields on purpose: an admin who searches for a Gmail
+ * address should not have to guess which of two boxes to type into, and the
+ * same box really does match either. The result count sits next to the field
+ * so a short list reads as "2 matches" rather than as a suspiciously short
+ * table, and the clear button is a real button so it is reachable by keyboard
+ * and announced as such.
+ */
+function CustomerSearch({
+  value,
+  onChange,
+  resultCount,
+  total,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  resultCount: number;
+  total: number;
+}) {
+  const inputId = 'admin-customer-search';
+  const isFiltered = value.trim().length > 0;
+
+  return (
+    <Card>
+      <div className="row-between wrap">
+        <div style={{ flex: 1, minWidth: 240, maxWidth: 420 }}>
+          <label className="label" htmlFor={inputId}>Find customer</label>
+          <div className="row" style={{ gap: 6 }}>
+            <span aria-hidden="true" style={{ color: 'var(--text-subtle)', display: 'flex' }}>
+              <Icons.search size={16} />
+            </span>
+            <Input
+              id={inputId}
+              type="search"
+              value={value}
+              autoComplete="off"
+              placeholder="Search by name or email…"
+              onChange={(e) => onChange(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            {isFiltered && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => onChange('')}
+                title="Clear search"
+                aria-label="Clear search"
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+          <div className="hint" role="status">
+            {isFiltered
+              ? `${resultCount} of ${total} ${total === 1 ? 'customer' : 'customers'} match`
+              : `${total} ${total === 1 ? 'customer' : 'customers'}`}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 /* ------------------------------------------------------------- customers */
 
 function CustomersTab({ currentUserId }: { currentUserId: string | undefined }) {
@@ -153,12 +218,30 @@ function CustomersTab({ currentUserId }: { currentUserId: string | undefined }) 
   const toast = useToast();
   const [editing, setEditing] = useState<User | null>(null);
 
-  const customers = useQuery({ queryKey: ['admin', 'customers'], queryFn: api.admin.customers });
+  /**
+   * Search is split into the raw input and a debounced value. Typing updates
+   * the input immediately so the field never feels laggy, while the query key
+   * only changes once the user pauses — otherwise every keystroke would be a
+   * round trip and the list would flicker through intermediate states.
+   */
+  const [search, setSearch] = useState('');
+  const [debounced, setDebounced] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(search.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const customers = useQuery({
+    queryKey: ['admin', 'customers', debounced],
+    queryFn: () => api.admin.customers(debounced || undefined),
+  });
 
   const update = useMutation({
     mutationFn: ({ id, input }: { id: string; input: Parameters<typeof api.admin.setCustomer>[1] }) =>
       api.admin.setCustomer(id, input),
     onSuccess: (_d, v) => {
+      // Prefix-invalidates every search variant, so an edit shows up under
+      // the admin's active filter without also clearing the filter itself.
       void qc.invalidateQueries({ queryKey: ['admin', 'customers'] });
       setEditing(null);
       const what = v.input.status ? `account ${v.input.status}` : 'account updated';
@@ -173,18 +256,45 @@ function CustomersTab({ currentUserId }: { currentUserId: string | undefined }) 
   }
 
   const list = customers.data.customers;
+  const isSearching = debounced.length > 0;
+  // The server reports the unfiltered total too, so the count line tells the
+  // admin how big the table is as well as how much of it the search found.
+  const total = customers.data.total ?? list.length;
+  const matched = customers.data.matched ?? list.length;
 
   if (list.length === 0) {
     return (
       <Card>
-        <EmptyState icon={<Icons.users size={20} />} title="No customers yet"
-          message="Accounts registered through the dashboard will appear here." />
+        {isSearching ? (
+          <>
+            <CustomerSearch
+              value={search}
+              onChange={setSearch}
+              resultCount={matched}
+              total={total}
+            />
+            <EmptyState
+              icon={<Icons.search size={20} />}
+              title={`No customers match "${debounced}"`}
+              message="Search covers both the customer's name and their email address. Check the spelling, or clear the search to see everyone."
+            />
+          </>
+        ) : (
+          <EmptyState icon={<Icons.users size={20} />} title="No customers yet"
+            message="Accounts registered through the dashboard will appear here." />
+        )}
       </Card>
     );
   }
 
   return (
     <>
+      <CustomerSearch
+        value={search}
+        onChange={setSearch}
+        resultCount={isSearching ? matched : total}
+        total={total}
+      />
       <div className="table-wrap">
         <div className="card">
           <table>
@@ -326,18 +436,30 @@ function CustomerDialog({ customer, isSelf, busy, onClose, onSave, onToggleStatu
    * current full list, so the customer does not silently lose access to
    * everything the admin did not tick.
    */
+  /**
+   * The routing keys, which is what the allowlist stores.
+   *
+   * `publicName` is typed optional because the API omits it for non-admins,
+   * and this component only ever renders for an admin. Filtering out the
+   * undefined keeps the types honest without a cast, and means a stray
+   * undefined could never be written into a customer's allowlist.
+   */
+  const routingKeys = allModels
+    .map((m) => m.publicName)
+    .filter((k): k is string => typeof k === 'string');
+
   function toggleModel(name: string) {
     setDraft((d) => {
       if (!d) return d;
       const current = d.limits.allowedModels;
-      const base = current ?? allModels.map((m) => m.publicName);
+      const base = current ?? routingKeys;
       const next = base.includes(name) ? base.filter((m) => m !== name) : [...base, name];
       return { ...d, limits: { ...d.limits, allowedModels: next } };
     });
   }
 
   function setAllowAll(allowAll: boolean) {
-    setDraft((d) => (d ? { ...d, limits: { ...d.limits, allowedModels: allowAll ? null : allModels.map((m) => m.publicName) } } : d));
+    setDraft((d) => (d ? { ...d, limits: { ...d.limits, allowedModels: allowAll ? null : routingKeys } } : d));
   }
 
   /** Re-seeds the draft from freshly loaded server values. */
@@ -472,10 +594,19 @@ function CustomerDialog({ customer, isSelf, busy, onClose, onSave, onToggleStatu
                     <label className="checkbox-row" key={m.id}>
                       <input
                         type="checkbox"
-                        checked={draftForCustomer.allowedModels?.includes(m.publicName) ?? false}
-                        onChange={() => toggleModel(m.publicName)}
+                        checked={
+                          m.publicName !== undefined &&
+                          (draftForCustomer.allowedModels?.includes(m.publicName) ?? false)
+                        }
+                        disabled={m.publicName === undefined}
+                        onChange={() => m.publicName && toggleModel(m.publicName)}
                       />
-                      <span className="mono">{m.publicName}</span>
+                      {/* The checkbox still toggles the routing key, because
+                          that is what the allowlist is compared against on
+                          every request. Only the rendered text changes: an
+                          operator reading this screen should not have the
+                          internal id in front of them either. */}
+                      <span>{m.label}</span>
                       <span className="small subtle">{m.provider}</span>
                     </label>
                   ))}

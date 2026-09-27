@@ -535,3 +535,27 @@ tbody tr:hover { background: var(--surface-2); }
 @media (prefers-reduced-motion: reduce) {
   .meter-fill { transition: none; }
 }
+
+/* ------------------------------------------------------------ playground */
+
+.playground-turns {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 320px; overflow-y: auto;
+}
+.playground-turn {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 9px 12px; background: var(--surface-2);
+}
+.playground-turn.user { background: var(--surface); }
+.playground-turn-role {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); margin-bottom: 4px; font-weight: 600;
+}
+.playground-turn-body { white-space: pre-wrap; word-break: break-word; font-size: 0.88rem; }
+
+.playground-raw {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 12px; overflow-x: auto;
+  font-family: var(--mono); font-size: 0.76rem; line-height: 1.6;
+  margin: 0; max-height: 260px; white-space: pre-wrap; word-break: break-word;
+}

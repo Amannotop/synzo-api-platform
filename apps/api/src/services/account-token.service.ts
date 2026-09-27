@@ -150,11 +150,45 @@ export class AccountTokenService {
     return user ? { userId: user.id, email: user.email } : null;
   }
 
-  /** Removes rows that expired long ago. Safe to call on a timer. */
+  /**
+   * Removes rows that expired long ago. Safe to call on a timer.
+   *
+   * The bound value is an ISO string rather than a Date: a raw `sql` template
+   * passes its parameters straight to postgres.js, which throws on a Date
+   * ("The \"string\" argument must be of type string or an instance of Buffer or
+   * ArrayBuffer") before the query is sent. The explicit `::timestamptz` cast
+   * keeps Postgres from inferring a different type for the comparison.
+   */
   async purgeExpired(olderThan: Date): Promise<number> {
     const rows = await this.deps.db
       .delete(accountTokens)
-      .where(sql`${accountTokens.expiresAt} < ${olderThan}`)
+      .where(sql`${accountTokens.expiresAt} < ${olderThan.toISOString()}::timestamptz`)
+      .returning({ id: accountTokens.id });
+    return rows.length;
+  }
+
+  /**
+   * Removes every row that can no longer be redeemed, for the retention job.
+   *
+   * Two disjoint cases, both dead weight:
+   *  - past `expires_at`, whether or not it was ever consumed;
+   *  - already `consumed_at`, but created before `spentBefore`, so an incident
+   *    trail of "this reset was requested and completed" survives briefly
+   *    without the table growing forever.
+   *
+   * The second case is what an expiry-only rule misses: a token consumed
+   * inside its own window is still well before `expires_at`, so every
+   * successful password reset and verification would stay on disk forever.
+   */
+  async purgeStale(spentBefore: Date): Promise<number> {
+    // Bound as an ISO string, for the same reason as purgeExpired above.
+    const spentBeforeIso = spentBefore.toISOString();
+    const rows = await this.deps.db
+      .delete(accountTokens)
+      .where(
+        sql`${accountTokens.expiresAt} < now()
+            or (${accountTokens.consumedAt} is not null and ${accountTokens.createdAt} < ${spentBeforeIso}::timestamptz)`,
+      )
       .returning({ id: accountTokens.id });
     return rows.length;
   }

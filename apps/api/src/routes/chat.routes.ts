@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 import { buildChatRequestSchema } from '@synzo/validation';
+import { assistantDisplayName, modelResponseName } from '@synzo/config';
 import type { AppConfig } from '@synzo/config';
 import type { ChatService } from '../services/chat.service.js';
 import { createApiKeyAuth, type ApiKeyContext } from '../middleware/api-key-auth.js';
@@ -119,6 +120,8 @@ async function streamResponse(
         messages: resolved.messages,
         stream: true,
         ...(resolved.maxTokens !== undefined ? { max_tokens: resolved.maxTokens } : {}),
+        ...(resolved.tools !== undefined ? { tools: resolved.tools } : {}),
+        ...(resolved.toolChoice !== undefined ? { tool_choice: resolved.toolChoice } : {}),
       },
       controller.signal,
     );
@@ -134,7 +137,7 @@ async function streamResponse(
         break;
       }
       if (controller.signal.aborted) break;
-      const frame = next.value;
+      const frame = maskStreamFrameBranding(next.value, resolved.modelName);
       const ok = raw.write(frame);
       if (!ok) {
         // Respect backpressure: wait for drain before pulling the next frame.
@@ -164,4 +167,85 @@ async function streamResponse(
   }
 
   return reply;
+}
+
+/**
+ * Rewrites the upstream's branding in one SSE frame.
+ *
+ * Two fields, and the second only turned up in live testing. `model` is the id
+ * the upstream echoes, which must read as the name the caller sent. `name`
+ * inside `message` and `delta` is the brand the upstream stamps onto every
+ * assistant turn it emits; rewriting `model` alone still left the vendor
+ * plainly readable in the body.
+ *
+ * Both message shapes are handled because they are not interchangeable:
+ * non-streaming puts it in `message`, streaming puts it in `delta`, and an
+ * agent client sees the streaming one.
+ *
+ * `delta.tool_calls[].function.name` is deliberately untouched. That is the
+ * customer's own tool, and renaming it would break the call it is meant to
+ * produce.
+ *
+ * A frame that is not parseable JSON is passed through unchanged. Rewriting must
+ * never be the reason a stream breaks: the terminal `[DONE]` marker and any
+ * unrecognized frame have to survive intact, or a client would hang waiting for
+ * an end it never sees.
+ */
+function maskStreamFrameBranding(frame: string, publicName: string): string {
+  if (!frame.startsWith('data:')) return frame;
+  const payload = frame.slice('data:'.length).trim();
+  if (!payload.startsWith('{') || payload === '[DONE]') return frame;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return frame;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return frame;
+  const obj = parsed as Record<string, unknown>;
+
+  // The model id is rewritten unconditionally when present. This is decided on
+  // its own and NOT gated on the name check below: a chunk carrying only a
+  // content delta has no assistant name at all, and gating the id on that made
+  // exactly those chunks skip the rewrite.
+  // The target is the RESPONSE name, not the public name. Comparing against
+  // the public name was what let the leak through: on a row whose public name
+  // is itself the internal id, `obj.model !== publicName` was false, no rewrite
+  // ran, and the upstream id reached the client untouched in a streamed frame.
+  const target = modelResponseName(publicName);
+  const modelChanged = typeof obj.model === 'string' && obj.model !== target;
+
+  const choices = obj.choices;
+  const maskedChoices = Array.isArray(choices)
+    ? choices.map((choice) => {
+        if (typeof choice !== 'object' || choice === null) return choice;
+        const c = choice as Record<string, unknown>;
+        // `delta` on a stream, `message` on a non-stream: not interchangeable.
+        const key = c.delta !== undefined ? 'delta' : c.message !== undefined ? 'message' : null;
+        if (key === null) return choice;
+        const holder = c[key];
+        if (typeof holder !== 'object' || holder === null) return choice;
+        const h = holder as Record<string, unknown>;
+        const name = assistantDisplayName(h.name as string | undefined);
+        // A name we do not recognise is the caller's own and is left alone.
+        if (name === null || name === h.name) return choice;
+        return { ...c, [key]: { ...h, name } };
+      })
+    : choices;
+
+  const nameChanged =
+    Array.isArray(choices) &&
+    Array.isArray(maskedChoices) &&
+    maskedChoices.some((c, i) => c !== choices[i]);
+  if (!modelChanged && !nameChanged) return frame;
+
+  // Preserve the frame's original framing: SSE lines end with a newline, and
+  // the upstream's trailing newline is part of what the client parses.
+  const suffix = frame.endsWith('\n\n') ? '\n\n' : frame.endsWith('\n') ? '\n' : '';
+  return `data: ${JSON.stringify({
+    ...obj,
+    ...(modelChanged ? { model: target } : {}),
+    ...(nameChanged ? { choices: maskedChoices } : {}),
+  })}${suffix}`;
 }

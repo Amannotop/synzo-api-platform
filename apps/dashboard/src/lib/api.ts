@@ -1,10 +1,12 @@
 import type {
   ApiKey,
   Limits,
+  MetricsSummary,
   Model,
   Overview,
   Project,
   Provider,
+  ProviderHealthEntry,
   Range,
   RequestLogRow,
   Stats,
@@ -133,7 +135,25 @@ export const api = {
 
   // --- admin ---
   admin: {
-    customers: () => request<{ customers: User[]; total: number }>('/api/admin/customers'),
+    /**
+     * The live operational summary.
+     *
+     * This reads the JSON summary rather than the Prometheus text at
+     * /metrics, which is for a scraper. Parsing the exposition format in the
+     * browser would mean re-implementing it here and having two definitions of
+     * what p95 means.
+     */
+    metrics: () =>
+      request<{ summary: MetricsSummary; providers: ProviderHealthEntry[] }>('/api/admin/metrics'),
+    /**
+     * `q` is the admin's name-or-email search term. Passing undefined omits the
+     * parameter entirely, which keeps the unfiltered request byte-identical to
+     * what it was before search existed.
+     */
+    customers: (q?: string) =>
+      request<{ customers: User[]; total: number; matched: number; query: string }>(
+        `/api/admin/customers${q ? `?q=${encodeURIComponent(q)}` : ''}`,
+      ),
     customerLimits: (id: string) => request<{ limits: Limits }>(`/api/admin/customers/${id}/limits`),
     setCustomerLimits: (id: string, input: Partial<Limits>) =>
       request<{ limits: Limits }>(`/api/admin/customers/${id}/limits`, {

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '@synzo/config';
+import { isInternalModelName, modelExternalName, providerBrand, resolveModelAlias } from '@synzo/config';
 import { createApiKeyAuth } from '../middleware/api-key-auth.js';
 import { filterByAllowedModels, parseAllowedModels } from '../lib/allowed-models.js';
 import type { ApiKeyRepository } from '../repositories/api-key.repository.js';
@@ -9,8 +10,8 @@ import type { ProviderHealthMonitor } from '../services/provider-health.service.
 import type { Redis } from 'ioredis';
 import type { Database } from '@synzo/database';
 import { sql } from 'drizzle-orm';
+import { APP_VERSION } from '../lib/version.js';
 
-const VERSION = '1.0.0';
 const STARTED_AT = new Date().toISOString();
 
 interface SystemDeps {
@@ -35,7 +36,7 @@ export async function registerSystemRoutes(app: FastifyInstance, deps: SystemDep
 
   app.get('/health', async () => ({
     status: 'ok',
-    version: VERSION,
+    version: APP_VERSION,
     uptime: Math.round(process.uptime()),
     startedAt: STARTED_AT,
   }));
@@ -70,7 +71,7 @@ export async function registerSystemRoutes(app: FastifyInstance, deps: SystemDep
   });
 
   app.get('/version', async () => ({
-    version: VERSION,
+    version: APP_VERSION,
     environment: config.env,
     startedAt: STARTED_AT,
     node: process.version,
@@ -90,17 +91,34 @@ export async function registerSystemRoutes(app: FastifyInstance, deps: SystemDep
     return {
       object: 'list',
       data: allowed.map((m) => ({
-        id: m.publicName,
+        // The display name is the advertised id, so a caller reading this list
+        // sees "GPT-6 Astra" rather than the internal tier. The tier keeps
+        // working as an alias in a request, so existing integrations do not
+        // break; `sinki_aliases` spells that out for a caller that only ever
+        // reads this endpoint.
+        id: modelExternalName(m.publicName),
         object: 'model',
         created: Math.floor(new Date(m.created).getTime() / 1000),
-        owned_by: m.provider,
+        owned_by: providerBrand(m.provider),
+        // Omitted, not renamed, when the routing key is itself an internal
+        // id: there is no safe alias to offer, and a placeholder here would
+        // advertise a name that cannot be sent in a request.
+        ...(isInternalModelName(m.publicName) ? {} : { sinki_tier: m.publicName }),
       })),
+      // Not part of the OpenAI shape; additive fields are ignored by OpenAI
+      // SDKs, so this is the safe place to explain the alias relationship.
+      sinki_aliases: Object.fromEntries(
+        allowed
+          .map((m) => [modelExternalName(m.publicName), m.publicName] as const)
+          .filter(([label, tier]) => label !== tier && !isInternalModelName(tier)),
+      ),
     };
   });
 
   app.get('/v1/models/:model', { preHandler: auth }, async (request, reply) => {
     const { model } = request.params as { model: string };
-    const found = await models.findEnabled(model);
+    // Accept the display name as well as the tier, matching /v1/models.
+    const found = await models.findEnabled(resolveModelAlias(model));
     if (!found) {
       return reply.status(404).send({
         error: {
@@ -112,10 +130,11 @@ export async function registerSystemRoutes(app: FastifyInstance, deps: SystemDep
       });
     }
     return {
-      id: found.publicName,
+      id: modelExternalName(found.publicName),
       object: 'model',
       created: Math.floor(Date.now() / 1000),
-      owned_by: found.provider,
+      owned_by: providerBrand(found.provider),
+      ...(isInternalModelName(found.publicName) ? {} : { sinki_tier: found.publicName }),
     };
   });
 }

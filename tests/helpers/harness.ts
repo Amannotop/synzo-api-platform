@@ -53,6 +53,11 @@ export interface Harness {
   redis: Redis;
   upstream: LocalUpstream;
   config: ReturnType<typeof buildConfig>;
+  /**
+   * The retention job, so a test can drive a sweep directly rather than
+   * waiting on its timer or reaching into the process's private state.
+   */
+  retention: BuiltApp['retention'];
   close: () => Promise<void>;
 }
 
@@ -93,6 +98,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     redis,
     upstream,
     config,
+    retention: built.retention,
     close: async () => {
       await built.app.close();
       await handle.close();

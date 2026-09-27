@@ -9,6 +9,17 @@ import { compactNumber, formatDateTime, formatMs, formatNumber } from '../lib/fo
 import { Alert, Card, EmptyState, Loading, Stat } from '../components/ui';
 import type { Range } from '../lib/types';
 
+/**
+ * Upstream cost is only ever shown when the provider reported it. `upstreamCost`
+ * is a Postgres `numeric`, so it reaches the browser as a JSON number here — but
+ * this renders defensively regardless, because calling `.toFixed` on an
+ * unexpected value threw and blanked the entire page rather than one cell.
+ */
+function formatCost(cost: number | null | undefined): string {
+  if (cost === null || cost === undefined || !Number.isFinite(cost)) return '—';
+  return cost.toFixed(6);
+}
+
 const RANGES: { value: Range; label: string }[] = [
   { value: 'today', label: 'Today' },
   { value: '7d', label: '7 days' },
@@ -136,10 +147,7 @@ export default function Usage() {
                       <td className="mono">{m.model}</td>
                       <td className="num">{formatNumber(m.requests)}</td>
                       <td className="num">{formatNumber(m.totalTokens)}</td>
-                      <td className="num muted">
-                        {/* Cost is only ever shown when the provider reported it. */}
-                        {m.upstreamCost === null ? '—' : m.upstreamCost.toFixed(6)}
-                      </td>
+                      <td className="num muted">{formatCost(m.upstreamCost)}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -8,7 +8,7 @@ import {
   usageQuerySchema,
 } from '@synzo/validation';
 import type { AppConfig } from '@synzo/config';
-import { MODEL_TIERS } from '@synzo/config';
+import { MODEL_TIERS, modelExternalName, modelResponseName, providerBrand } from '@synzo/config';
 import { badRequest, conflict, notFoundOrForbidden, HttpError } from '../lib/errors.js';
 import { deriveKeyPrefix, generateApiKeySecret, hashApiKey } from '../lib/crypto.js';
 import { requireSession } from '../middleware/session-auth.js';
@@ -268,7 +268,16 @@ export async function registerCustomerRoutes(app: FastifyInstance, deps: Custome
       requestsRepo.usageByModel(user.userId, from, to),
     ]);
 
-    return { range: { from, to }, stats, series, byModel };
+    // Historical rows predate the tiered catalogue and carry the upstream's
+    // own id in model_name, so the stored value cannot be shown as-is. This is
+    // a display concern only: the aggregate keys stay untouched, so filtering
+    // and totals are unaffected.
+    return {
+      range: { from, to },
+      stats,
+      series,
+      byModel: byModel.map((m) => ({ ...m, model: modelResponseName(m.model) })),
+    };
   });
 
   /* ---------------------------------------------------------- requests */
@@ -293,7 +302,14 @@ export async function registerCustomerRoutes(app: FastifyInstance, deps: Custome
       requestsRepo.countForUser(user.userId, { from, to }),
     ]);
 
-    return { requests: rows, total, limit: q.limit, offset: q.offset };
+    // Same reason as the usage breakdown: a stored model_name is a routing
+    // key, and on a legacy row that key is the internal id.
+    return {
+      requests: rows.map((r) => ({ ...r, model: modelResponseName(r.model) })),
+      total,
+      limit: q.limit,
+      offset: q.offset,
+    };
   });
 
   /* ------------------------------------------------------------- models */
@@ -316,10 +332,22 @@ export async function registerCustomerRoutes(app: FastifyInstance, deps: Custome
       const tier = MODEL_TIERS.find((t) => t.tier === m.publicName);
       return {
         id: m.id,
-        publicName: m.publicName,
-        label: tier?.label ?? m.publicName,
+        // The routing key, carried internally for the sort and the allowlist
+        // filter below and then stripped before the response is built. On a
+        // legacy row this key IS the internal upstream id, so it cannot ride
+        // along in a payload: a field nobody reads is still a field sitting in
+        // the response, and a customer can read the whole body.
+        _routingKey: m.publicName,
+        label: modelExternalName(m.publicName),
+        // The name to actually send as `model`. It equals publicName for
+        // every catalogue tier, but a legacy row keyed on an internal id is
+        // addressable by its display name, so the dashboard must not
+        // suggest sending the id it is trying to hide.
+        addressable: modelExternalName(m.publicName),
         description: tier?.description ?? '',
-        provider: m.provider,
+        // Branded, not the internal provider name: which upstream actually
+        // serves a tier is a routing detail, not part of the product.
+        provider: providerBrand(m.provider),
         enabled: 'enabled' in m ? m.enabled : true,
         createdAt: 'createdAt' in m ? m.createdAt : m.created,
       };
@@ -329,20 +357,32 @@ export async function registerCustomerRoutes(app: FastifyInstance, deps: Custome
     // order a customer choosing a tier wants to read. Anything not in the
     // catalogue sorts after it, alphabetically, so custom entries stay stable.
     const rank = new Map(MODEL_TIERS.map((t, i) => [t.tier, i]));
-    all.sort((a, b) => {
-      const ra = rank.get(a.publicName);
-      const rb = rank.get(b.publicName);
+    all.sort((x, y) => {
+      const ra = rank.get(x._routingKey);
+      const rb = rank.get(y._routingKey);
       if (ra !== undefined && rb !== undefined) return ra - rb;
       if (ra !== undefined) return -1;
       if (rb !== undefined) return 1;
-      return a.publicName.localeCompare(b.publicName);
+      return x._routingKey.localeCompare(y._routingKey);
     });
 
     const raw = await deps.users.getLimits(user.userId);
-    const allowed = filterByAllowedModels(all, parseAllowedModels(raw.allowedModels), (m) => m.publicName);
+    const allowed = filterByAllowedModels(
+      all,
+      parseAllowedModels(raw.allowedModels),
+      (m) => m._routingKey,
+    );
+
+    // The routing key is an internal detail of the two operations above. An
+    // admin still receives it, because the allowlist editor stores and
+    // compares those values verbatim; a customer does not, since they have no
+    // editor for it and would only ever be shown the internal id.
+    const shaped = allowed.map(({ _routingKey, ...rest }) =>
+      isAdmin ? { ...rest, publicName: _routingKey } : rest,
+    );
 
     return {
-      models: allowed,
+      models: shaped,
       providers: isAdmin ? await deps.models.listProviders() : [],
     };
   });

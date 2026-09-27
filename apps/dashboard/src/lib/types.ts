@@ -47,10 +47,23 @@ export interface ApiKey {
 
 export interface Model {
   id: string;
-  /** What a customer sends as `model` in the API. */
-  publicName: string;
+  /**
+   * The routing key, sent to admins only.
+   *
+   * The allowlist editor stores and compares these values verbatim, so a
+   * customer who edited their own limits without it would have their change
+   * silently ignored. Absent for non-admins, where it would only ever be a
+   * place for the internal upstream id to sit in a response body.
+   */
+  publicName?: string;
   /** Friendly name shown in the dashboard, e.g. "GPT-6 Astra". */
   label: string;
+  /**
+   * The name to send as `model`. Equal to `label` for catalogue tiers.
+   * Kept separate because a row whose public name is an internal id is
+   * addressable by its display name only.
+   */
+  addressable: string;
   /** One-line description of what the tier is for. */
   description: string;
   provider: string;
@@ -122,3 +135,33 @@ export interface Usage {
 }
 
 export type Range = 'today' | '7d' | '30d' | '90d' | 'custom';
+
+/* ------------------------------------------------------------------ metrics */
+
+export interface ModelTraffic {
+  model: string;
+  total: number;
+  errors: number;
+}
+
+/** Mirrors MetricsSummary in apps/api/src/metrics/summary.ts. */
+export interface MetricsSummary {
+  httpRequestsTotal: number;
+  errorRate: number;
+  upstreamErrors: { kind: string; count: number }[];
+  upstreamErrorsTotal: number;
+  rateLimitRejections: { scope: string; count: number }[];
+  rateLimitRejectionsTotal: number;
+  byModel: ModelTraffic[];
+  /** Seconds. Null when nothing has been observed yet. */
+  latency: { p50: number | null; p95: number | null; p99: number | null; count: number };
+  processUptimeSeconds: number;
+}
+
+export interface ProviderHealthEntry {
+  provider: string;
+  healthy: boolean;
+  latencyMs: number | null;
+  checkedAt: string;
+  detail?: string;
+}

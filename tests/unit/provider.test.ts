@@ -36,6 +36,19 @@ const PAYLOAD = {
   stream: false,
 };
 
+const TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'get_weather',
+    description: 'Look up the weather',
+    parameters: {
+      type: 'object',
+      properties: { city: { type: 'string' } },
+      required: ['city'],
+    },
+  },
+};
+
 beforeAll(() => up.start());
 afterAll(() => up.stop());
 afterEach(() => {
@@ -59,6 +72,48 @@ describe('upstream request mapping (spec 12, 17)', () => {
 
     const sent = up.requests.at(-1)!.body as Record<string, unknown>;
     expect(Object.keys(sent).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream']);
+  });
+
+  it('forwards tools and tool_choice on the non-streaming path', async () => {
+    const provider = new OpenCodeProvider(makeConfig());
+    await provider.chat(
+      { ...PAYLOAD, tools: [TOOL], tool_choice: 'auto' } as never,
+      new AbortController().signal,
+    );
+    const sent = up.requests.at(-1)!.body as Record<string, unknown>;
+    expect(sent.tools).toEqual([TOOL]);
+    expect(sent.tool_choice).toBe('auto');
+  });
+
+  it('forwards a named-function tool_choice unchanged', async () => {
+    const provider = new OpenCodeProvider(makeConfig());
+    const choice = { type: 'function', function: { name: 'get_weather' } };
+    await provider.chat(
+      { ...PAYLOAD, tools: [TOOL], tool_choice: choice } as never,
+      new AbortController().signal,
+    );
+    expect((up.requests.at(-1)!.body as { tool_choice: unknown }).tool_choice).toEqual(choice);
+  });
+
+  it('forwards tools on the streaming path too', async () => {
+    const provider = new OpenCodeProvider(makeConfig());
+    up.respondWith((_req, res) => sse(res, ['data: [DONE]\n\n']));
+    const gen = provider.streamChat(
+      { ...PAYLOAD, tools: [TOOL], tool_choice: 'required' } as never,
+      new AbortController().signal,
+    );
+    for await (const _ of gen) { /* drain */ }
+    const sent = up.requests.at(-1)!.body as Record<string, unknown>;
+    expect(sent.tools).toEqual([TOOL]);
+    expect(sent.tool_choice).toBe('required');
+  });
+
+  it('sends neither key when the customer sent neither', async () => {
+    const provider = new OpenCodeProvider(makeConfig());
+    await provider.chat(PAYLOAD, new AbortController().signal);
+    const sent = up.requests.at(-1)!.body as Record<string, unknown>;
+    expect('tools' in sent).toBe(false);
+    expect('tool_choice' in sent).toBe(false);
   });
 
   it('omits max_tokens entirely when the customer did not set it', async () => {

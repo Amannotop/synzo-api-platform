@@ -16,6 +16,11 @@ const ignores = [
   '**/*.d.ts',
   '**/vite.config.ts',
   '**/drizzle.config.ts',
+  // Editor/agent scratch checkouts that live inside the repo but are not part
+  // of this project. Linting a stale copy of the workspace reports errors that
+  // belong to code nobody is shipping.
+  '.kilo/**',
+  '.git/**',
 ];
 
 export default tseslint.config(

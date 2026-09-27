@@ -9,6 +9,8 @@ import Models from './pages/Models';
 import Usage from './pages/Usage';
 import Requests from './pages/Requests';
 import Documentation from './pages/Documentation';
+import Playground from './pages/Playground';
+import Operations from './pages/Operations';
 import Settings from './pages/Settings';
 import Admin from './pages/Admin';
 import NotFound from './pages/NotFound';
@@ -66,13 +68,25 @@ export default function App() {
         <Route path="/models" element={<Models />} />
         <Route path="/usage" element={<Usage />} />
         <Route path="/requests" element={<Requests />} />
-        <Route path="/docs" element={<Documentation />} />
+        {/* The API serves its own interactive reference at /docs, so the
+            hand-written page is now /documentation and links across to it.
+            Keeping the dashboard's own /docs path would shadow the API's. */}
+        <Route path="/documentation" element={<Documentation />} />
+        <Route path="/playground" element={<Playground />} />
         <Route path="/settings" element={<Settings />} />
         <Route
           path="/admin"
           element={
             <RequireAdmin>
               <Admin />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/operations"
+          element={
+            <RequireAdmin>
+              <Operations />
             </RequireAdmin>
           }
         />

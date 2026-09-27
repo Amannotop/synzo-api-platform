@@ -65,6 +65,12 @@ export class OpenCodeProvider implements AIProvider {
    * Only the parameters verified to work upstream are sent. temperature, top_p,
    * stop, presence_penalty, frequency_penalty and user are accepted at the edge
    * for SDK compatibility but deliberately dropped here (§12).
+   *
+   * `tools` and `tool_choice` ARE forwarded: verified live against
+   * opencode.ai/zen, a request carrying `tools` comes back with
+   * finish_reason "tool_calls" and a populated message.tool_calls. They are
+   * spread in rather than nested, and both paths (streaming and not) go through
+   * this one function, so neither can drift.
    */
   private toUpstreamBody(payload: ChatRequestPayload): Record<string, unknown> {
     const body: Record<string, unknown> = {
@@ -73,6 +79,11 @@ export class OpenCodeProvider implements AIProvider {
       stream: payload.stream,
     };
     if (payload.max_tokens !== undefined) body.max_tokens = payload.max_tokens;
+    // Only set when the customer actually supplied them. An empty `tools: []`
+    // is forwarded as sent rather than dropped, so a caller that deliberately
+    // removes its tools is not silently overruled.
+    if (payload.tools !== undefined) body.tools = payload.tools;
+    if (payload.tool_choice !== undefined) body.tool_choice = payload.tool_choice;
     return body;
   }
 
@@ -246,9 +257,22 @@ export class OpenCodeProvider implements AIProvider {
           type: 'not_found_error',
         });
       }
-      if (upstreamMsg) message = upstreamMsg;
-      code = `upstream_${res.status}`;
-      type = res.status === 429 ? 'rate_limit_error' : 'upstream_error';
+      /**
+       * A 401/403 with no ModelError body is a credential rejection, and the
+       * upstream's own text is not echoed: it routinely contains the rejected
+       * token. The status alone is enough for the caller to classify it, and
+       * keeping the message generic here is what makes "never echo upstream
+       * text" a property of this function rather than of each caller.
+       */
+      if (res.status === 401 || res.status === 403) {
+        message = 'The upstream provider rejected our credentials';
+        code = 'upstream_authentication_failed';
+        type = 'upstream_error';
+      } else {
+        if (upstreamMsg) message = upstreamMsg;
+        code = `upstream_${res.status}`;
+        type = res.status === 429 ? 'rate_limit_error' : 'upstream_error';
+      }
     } catch {
       // Upstream returned a non-JSON error body; keep the generic message.
     }
@@ -260,10 +284,25 @@ export class OpenCodeProvider implements AIProvider {
       type: string;
       retryable: boolean;
     };
-    safe.httpStatus = res.status === 429 ? 429 : res.status >= 500 ? 502 : 400;
+    /**
+     * `httpStatus` is what the ChatService branches on, so it carries the
+     * UPSTREAM status: 401 stays 401 so it is recognised as an auth failure,
+     * not flattened into 400 where it would look like a bad customer request.
+     * The 5xx the customer actually sees is decided in normalizeProviderError.
+     */
+    safe.httpStatus =
+      res.status === 429
+        ? 429
+        : res.status === 401 || res.status === 403
+          ? res.status
+          : res.status >= 500
+            ? 502
+            : 400;
     safe.code = code;
     safe.type = type;
-    safe.retryable = retryable;
+    // A rejected credential will not fix itself on retry, so anything that
+    // treats retryable as "try again" is wasting the customer's time.
+    safe.retryable = res.status === 401 || res.status === 403 ? false : retryable;
     return safe;
   }
 

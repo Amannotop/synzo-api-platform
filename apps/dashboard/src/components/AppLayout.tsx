@@ -11,18 +11,21 @@ const NAV = [
   { to: '/models', label: 'Models', icon: Icons.cube },
   { to: '/usage', label: 'Usage', icon: Icons.chart },
   { to: '/requests', label: 'Requests', icon: Icons.list },
-  { to: '/docs', label: 'Documentation', icon: Icons.book },
+  { to: '/playground', label: 'Playground', icon: Icons.terminal },
+  { to: '/documentation', label: 'Documentation', icon: Icons.book },
   { to: '/settings', label: 'Settings', icon: Icons.settings },
 ];
 
 const ADMIN_NAV = [
   { to: '/admin', label: 'Admin', icon: Icons.shield },
+  { to: '/operations', label: 'Operations', icon: Icons.chart },
 ];
 
 const TITLES: Record<string, string> = {
   '/': 'Dashboard', '/keys': 'API Keys', '/projects': 'Projects', '/models': 'Models',
-  '/usage': 'Usage', '/requests': 'Requests', '/docs': 'Documentation',
-  '/settings': 'Settings', '/admin': 'Admin',
+  '/usage': 'Usage', '/requests': 'Requests', '/documentation': 'Documentation',
+  '/playground': 'Playground',
+  '/settings': 'Settings', '/admin': 'Admin', '/operations': 'Operations',
 };
 
 export default function AppLayout() {

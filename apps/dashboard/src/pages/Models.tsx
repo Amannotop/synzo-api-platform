@@ -56,14 +56,14 @@ export default function Models() {
                   <div>
                     <div className="row wrap mb-1">
                       <span className="strong">{m.label}</span>
-                      <span className={`badge ${m.enabled ? 'badge-accent' : 'badge-neutral'}`}>{m.publicName}</span>
+                      <span className={`badge ${m.enabled ? 'badge-accent' : 'badge-neutral'}`}>{m.addressable}</span>
                       <span className={`badge ${m.enabled ? 'badge-success' : 'badge-neutral'}`}>
                         <span className="dot" />{m.enabled ? 'enabled' : 'disabled'}
                       </span>
                     </div>
                     {m.description && <div className="small muted mb-1">{m.description}</div>}
                     <div className="small muted">
-                      Send <span className="mono">model: "{m.publicName}"</span> · provider{' '}
+                      Send <span className="mono">model: "{m.addressable}"</span> · provider{' '}
                       <span className="mono">{m.provider}</span> · added {formatDate(m.createdAt)}
                     </div>
                   </div>

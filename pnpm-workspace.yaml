@@ -6,4 +6,7 @@ packages:
 # runs an install script. esbuild downloads a prebuilt platform binary that
 # Vite, Vitest and tsx all need at runtime.
 allowBuilds:
+  # A telemetry ping from a transitive dependency. The build does not need
+  # it, so it is declined rather than granted.
+  '@scarf/scarf': false
   esbuild: true

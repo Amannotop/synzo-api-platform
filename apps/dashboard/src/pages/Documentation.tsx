@@ -1,6 +1,21 @@
 import { useEffect, useState } from 'react';
-import { Card } from '../components/ui';
+import { Alert, Card } from '../components/ui';
 import { useAuth } from '../lib/AuthContext';
+
+/**
+ * Quickstart, plus a pointer to the real reference.
+ *
+ * The API serves its own OpenAPI document at /openapi.json with a browsable
+ * rendering at /docs, generated from the code that serves the requests. The
+ * previous version of this page described the endpoints, the tiers and the
+ * error codes by hand, which is exactly the arrangement that drifts: routes
+ * change, the prose does not, and it goes on confidently describing endpoints
+ * that no longer exist.
+ *
+ * So the hand-written part is now only what a reference cannot say well — a
+ * first request, and what the numbers mean — and the exhaustive list lives in
+ * the spec, where it cannot disagree with the server.
+ */
 
 /** The base URL customers point their SDKs at, read from the live origin. */
 function useBaseUrl(): string {
@@ -8,14 +23,6 @@ function useBaseUrl(): string {
   useEffect(() => setBase(window.location.origin), []);
   return base;
 }
-
-const TIERS = [
-  { tier: 'max', label: 'GPT-6 Astra', description: 'Maximum capability. Hardest reasoning and the most thorough answers.' },
-  { tier: 'xhigh', label: 'GPT-5.6 Sol', description: 'Extra high. Near-maximum capability at lower cost and latency.' },
-  { tier: 'high', label: 'GPT-5.6 Terra', description: 'High. Strong general capability for complex work.' },
-  { tier: 'medium', label: 'Claude Opus 4.8', description: 'Medium. Balanced quality and speed for everyday tasks.' },
-  { tier: 'low', label: 'Claude Sonnet 4.6', description: 'Low. Fastest and cheapest. Best for simple, high-volume work.' },
-];
 
 const LANG_TABS = [
   { id: 'curl', label: 'cURL' },
@@ -34,17 +41,37 @@ export default function Documentation() {
       <div className="page-head">
         <div>
           <h1>Documentation</h1>
-          <p>Everything you need to call the platform. The endpoint is OpenAI-compatible.</p>
+          <p>
+            Everything you need to call the platform. The endpoint is OpenAI-compatible.
+          </p>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <a className="btn btn-ghost" href="/playground">
+            Try it live
+          </a>
+          <a className="btn btn-primary" href="/docs" target="_blank" rel="noreferrer">
+            Full API reference
+          </a>
+          <a className="btn btn-ghost" href="/openapi.json" target="_blank" rel="noreferrer">
+            openapi.json
+          </a>
         </div>
       </div>
 
       <div className="docs">
         <Card>
           <div className="card-body docs">
+            <Alert kind="info">
+              The exhaustive reference — every endpoint, request body, response shape and error
+              code — is generated from the running server and lives at <a href="/docs" target="_blank" rel="noreferrer"><code>/docs</code></a>.
+              This page is the short version.
+            </Alert>
+
             <h2>Authentication</h2>
             <p>
               Send your key as a bearer token. Keys are environment-prefixed:{' '}
-              <code>sk_test_</code> for test, <code>sk_live_</code> for live.
+              <code>sk_test_</code> for test, <code>sk_live_</code> for live. The secret is shown
+              once, when you create the key.
             </p>
             <pre><code>{`curl ${base}/v1/models \\
   -H "Authorization: Bearer sk_test_YOUR_KEY"`}</code></pre>
@@ -66,25 +93,32 @@ export default function Documentation() {
 
             <h3>Models</h3>
             <p>
-              Pick a tier by name. The platform resolves it to the underlying model for you, so
-              the name you send is the whole model surface.
+              Pick a tier by name. The platform resolves it to the underlying model for you, so the
+              name you send is the whole model surface. <code>GET /v1/models</code> returns the
+              current list, and the Models page shows the same thing.
             </p>
             <div className="table-wrap">
               <table>
                 <thead>
-                  <tr><th>Tier</th><th>Model</th><th>Use it for</th></tr>
+                  <tr><th>Tier</th><th>Use it for</th></tr>
                 </thead>
                 <tbody>
-                  {TIERS.map((t) => (
-                    <tr key={t.tier}>
-                      <td><span className="mono strong">{t.tier}</span></td>
-                      <td>{t.label}</td>
-                      <td className="small">{t.description}</td>
-                    </tr>
-                  ))}
+                  <tr><td><span className="mono strong">max</span></td>
+                    <td className="small">Maximum capability. Hardest reasoning and the most thorough answers.</td></tr>
+                  <tr><td><span className="mono strong">xhigh</span></td>
+                    <td className="small">Extra high. Near-maximum capability at lower cost and latency.</td></tr>
+                  <tr><td><span className="mono strong">high</span></td>
+                    <td className="small">High. Strong general capability for complex work.</td></tr>
+                  <tr><td><span className="mono strong">medium</span></td>
+                    <td className="small">Medium. Balanced quality and speed for everyday tasks.</td></tr>
+                  <tr><td><span className="mono strong">low</span></td>
+                    <td className="small">Low. Fastest and cheapest. Best for simple, high-volume work.</td></tr>
                 </tbody>
               </table>
             </div>
+            <p className="small">
+              The labels behind each tier are listed on the <a href="/models">Models</a> page.
+            </p>
 
             <h3>Response</h3>
             <pre><code>{`{
@@ -100,15 +134,15 @@ export default function Documentation() {
   "usage": { "total_tokens": 163 }
 }`}</code></pre>
             <p className="small">
-              Usage values come from the provider. If a field is not reported, the platform omits it
-              rather than inventing a number.
+              Usage values come from the provider. If a field is not reported, the platform omits
+              it rather than inventing a number.
             </p>
 
             <h2>Streaming</h2>
             <p>
               Set <code>stream: true</code> for Server-Sent Events. Chunks are forwarded as they
-              arrive and the stream ends with <code>data: [DONE]</code>. If the client disconnects,
-              the upstream request is aborted.
+              arrive and the stream ends with <code>data: [DONE]</code>. If the client
+              disconnects, the upstream request is aborted.
             </p>
 
             <div className="tabs" style={{ maxWidth: 340 }}>
@@ -177,32 +211,46 @@ print(response.choices[0].message.content)`}</code></pre>
     "code": "invalid_api_key"
   }
 }`}</code></pre>
+            <p className="small">
+              The full list, with the exact code for each condition, is in the{' '}
+              <a href="/docs" target="_blank" rel="noreferrer">API reference</a>. The ones worth
+              knowing before they surprise you:
+            </p>
             <ul>
-              <li><code>400 invalid_request</code> — malformed or invalid request body</li>
               <li><code>401 invalid_api_key</code> — missing, unknown, revoked, disabled or expired key</li>
-              <li><code>403 forbidden</code> — authenticated but not permitted</li>
               <li><code>404 invalid_model</code> — model does not exist or is disabled</li>
-              <li><code>413 payload_too_large</code> — body exceeds the configured limit</li>
               <li><code>429 rate_limit_exceeded</code> — rate or quota limit reached; see <code>Retry-After</code></li>
+              <li><code>502 upstream_authentication_failed</code> — the server's own upstream credential was rejected. This is our misconfiguration, not your request, and retrying will not help.</li>
               <li><code>502 upstream_error</code> — the provider failed</li>
               <li><code>504 upstream_timeout</code> — the provider did not respond in time</li>
             </ul>
+            <p className="small">
+              An upstream error message never contains the provider's own text, keys or stack
+              traces. A customer sees that the service failed and nothing more.
+            </p>
 
             <h2>Rate limits</h2>
             <p>Limits are applied per API key and come from your account configuration:</p>
             <ul>
-              <li><strong>{user?.email ? 'requests per minute' : 'Requests per minute'}</strong> — sliding window</li>
+              <li><strong>Requests per minute</strong> — sliding window</li>
               <li><strong>Requests per day</strong> — resets at midnight UTC</li>
               <li><strong>Tokens per day</strong> — counted from real usage</li>
               <li><strong>Max concurrent requests</strong> — in-flight requests per key</li>
             </ul>
-            <p>Your current limits are shown on the <a href="/settings">Settings</a> page.</p>
+            <p>
+              Your current limits are shown on the <a href="/settings">Settings</a> page
+              {user ? '' : ' once you are signed in'}.
+            </p>
 
             <h2>Usage and privacy</h2>
             <p>
               Every request is recorded with its model, status, latency and token counts. Prompts
               and completions are not stored unless content logging is explicitly enabled on the
               server. Your API key secrets are never shown after creation.
+            </p>
+            <p className="small">
+              Request history is pruned by a retention job. Daily usage totals are kept, so a
+              number you were billed for does not change when the underlying rows are removed.
             </p>
           </div>
         </Card>

@@ -199,3 +199,141 @@ describe('buildChatRequestSchema (spec 12, 22)', () => {
     expect((r as Record<string, unknown>).some_future_param).toBe(1);
   });
 });
+
+/**
+ * Tool calling. An agent client sends its toolset on every request, so a
+ * dropped `tools` is not a missing feature but a silent one: the call still
+ * returned 200 and the model replied in prose that it had no tools. These pin
+ * the shape we accept, and equally the shapes we must still refuse.
+ */
+describe('buildChatRequestSchema — tool calling', () => {
+  const ok = { model: 'gpt-4o', messages: [{ role: 'user' as const, content: 'hi' }] };
+  const getWeather = {
+    type: 'function',
+    function: {
+      name: 'get_weather',
+      description: 'Look up the weather',
+      parameters: {
+        type: 'object',
+        properties: { city: { type: 'string' } },
+        required: ['city'],
+      },
+    },
+  };
+
+  it('accepts a function tool and preserves its schema verbatim', () => {
+    const r = chatSchema.parse({ ...ok, tools: [getWeather] });
+    expect(r.tools).toEqual([getWeather]);
+  });
+
+  it('accepts a tool with no parameters schema, as some clients send', () => {
+    const r = chatSchema.parse({
+      ...ok,
+      tools: [{ type: 'function', function: { name: 'now' } }],
+    });
+    expect(r.tools).toHaveLength(1);
+  });
+
+  it('accepts vendor keys inside a function definition without rejecting them', () => {
+    const r = chatSchema.parse({
+      ...ok,
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'f', parameters: { type: 'object' }, strict: true },
+        },
+      ],
+    });
+    expect((r.tools![0] as { function: Record<string, unknown> }).function.strict).toBe(true);
+  });
+
+  it('accepts a tool description longer than any invented cap', () => {
+    // Real agent clients register shell and file tools whose descriptions run
+    // well past 4,000 characters. A cap here rejected them with a message
+    // naming tools.N.function.description, a field the caller never set.
+    const r = chatSchema.parse({
+      ...ok,
+      tools: [{ type: 'function', function: { name: 'read', description: 'x'.repeat(20_000) } }],
+    });
+    expect((r.tools![0] as { function: { description: string } }).function.description).toHaveLength(20_000);
+  });
+
+  it('rejects a tool that is not a function', () => {
+    expect(chatSchema.safeParse({ ...ok, tools: [{ type: 'retrieval' }] }).success).toBe(false);
+  });
+
+  it('rejects a function tool with no name', () => {
+    expect(
+      chatSchema.safeParse({ ...ok, tools: [{ type: 'function', function: { parameters: {} } }] }).success,
+    ).toBe(false);
+  });
+
+  it('accepts a toolset far larger than any old fixed cap', () => {
+    // A fixed count cap rejected real agent clients. The real bound is
+    // MAX_REQUEST_BODY_BYTES, which Fastify enforces before this schema runs.
+    const many = Array.from({ length: 400 }, (_, i) => ({
+      type: 'function',
+      function: { name: `t${i}`, parameters: { type: 'object' } },
+    }));
+    expect(chatSchema.safeParse({ ...ok, tools: many }).success).toBe(true);
+  });
+
+  it('accepts every tool_choice form', () => {
+    for (const choice of ['none', 'auto', 'required', { type: 'function', function: { name: 'get_weather' } }]) {
+      expect(chatSchema.safeParse({ ...ok, tool_choice: choice }).success).toBe(true);
+    }
+  });
+
+  it('rejects an unknown tool_choice', () => {
+    expect(chatSchema.safeParse({ ...ok, tool_choice: 'sometimes' }).success).toBe(false);
+  });
+
+  it('accepts an assistant turn that only requests tool calls', () => {
+    // content: null is what OpenAI clients emit here, and rejecting it would
+    // make every agent loop fail on its second turn.
+    const r = chatSchema.parse({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'user', content: 'weather in Delhi?' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            { id: 'call_1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Delhi"}' } },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'call_1', content: '22C and clear' },
+      ],
+    });
+    expect(r.messages).toHaveLength(3);
+    expect(r.messages[1].content).toBeNull();
+    expect(r.messages[2].tool_call_id).toBe('call_1');
+  });
+
+  it('rejects a tool call with no function name', () => {
+    const r = chatSchema.safeParse({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'user', content: 'hi' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 'call_1', type: 'function', function: { arguments: '{}' } }],
+        },
+      ],
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('still bounds tool-result content like any other message', () => {
+    const r = chatSchema.safeParse({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'tool', tool_call_id: 'c1', content: 'x'.repeat(LIMITS.maxMessageChars + 1) },
+      ],
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues[0].path).toEqual(['messages', 1, 'content']);
+  });
+});

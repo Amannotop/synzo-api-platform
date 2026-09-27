@@ -1,7 +1,7 @@
 import type { AppConfig } from '@synzo/config';
 import type { Logger } from '../lib/logger.js';
 import type { ProviderRegistry } from '../providers/provider.registry.js';
-import type { ProviderHealth } from '../providers/provider.interface.js';
+import type { ProviderHealth, ProviderHealthEntry } from '../providers/provider.interface.js';
 
 /**
  * Periodically probes each registered provider and remembers the last result.
@@ -58,7 +58,7 @@ export class ProviderHealthMonitor {
     }
   }
 
-  getAll(): ProviderHealth[] {
+  getAll(): ProviderHealthEntry[] {
     return [...this.latest.entries()].map(([provider, health]) => ({ provider, ...health }));
   }
 }

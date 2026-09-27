@@ -3,6 +3,7 @@ import type { Redis } from 'ioredis';
 import type { Logger } from '../lib/logger.js';
 import type { HttpError} from '../lib/errors.js';
 import { quotaExceeded, rateLimited } from '../lib/errors.js';
+import type { Metrics } from '../metrics/registry.js';
 
 export interface RateLimitInput {
   userId: string;
@@ -85,6 +86,13 @@ export class RateLimitService {
   constructor(
     private readonly redis: Redis,
     private readonly logger: Logger,
+    /**
+     * Optional so a caller that only needs enforcement (a one-off script, a
+     * narrow test) does not have to construct a registry. When present, a
+     * rejection is counted by which limit fired — the number that answers
+     * "is this customer being throttled, or is the platform slow?".
+     */
+    private readonly metrics?: Metrics,
   ) {}
 
   /* ------------------------------------------------------------ key naming */
@@ -309,6 +317,7 @@ export class RateLimitService {
         }),
       );
       if (reads.some((used) => used >= input.tokensPerDay)) {
+        this.metrics?.rateLimitRejections.inc({ scope: 'daily_tokens' });
         throw quotaExceeded('Daily token quota exceeded', 'daily_token_quota_exceeded');
       }
     }
@@ -337,7 +346,12 @@ export class RateLimitService {
       member,
     )) as [number, string, number];
 
-    if (res[0] !== 1) throw this.toHttpError(res[1], res[2]);
+    if (res[0] !== 1) {
+      // The Lua script names the limit that fired, so the counter is as
+      // specific as the customer-facing error.
+      this.metrics?.rateLimitRejections.inc({ scope: this.rejectionScope(res[1]) });
+      throw this.toHttpError(res[1], res[2]);
+    }
 
     let released = false;
     return {
@@ -349,6 +363,24 @@ export class RateLimitService {
         await this.releaseAll([user, key]);
       },
     };
+  }
+
+  /**
+   * The metric label for a rejection reason. Kept aligned with `toHttpError`:
+   * a new branch in one without the other silently produces an unlabelled or
+   * mislabelled counter.
+   */
+  private rejectionScope(reason: string): string {
+    switch (reason) {
+      case 'concurrency':
+        return 'concurrency';
+      case 'day':
+        return 'daily_requests';
+      case 'minute':
+        return 'per_minute';
+      default:
+        return 'unknown';
+    }
   }
 
   private toHttpError(reason: string, resetSec: number): HttpError {

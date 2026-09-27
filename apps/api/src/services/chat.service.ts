@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '@synzo/config';
+import { assistantDisplayName, buildIdentityInstruction, modelExternalName, modelResponseName, resolveModelAlias } from '@synzo/config';
 import type { ChatMessage } from '@synzo/types';
 import { HttpError, notFound, upstreamTimeout } from '../lib/errors.js';
 import { parseAllowedModels } from '../lib/allowed-models.js';
 import type { Logger } from '../lib/logger.js';
-import type { AIProvider, NormalizedUsage } from '../providers/provider.interface.js';
+import type { AIProvider, ChatTool, NormalizedUsage, ToolChoice } from '../providers/provider.interface.js';
 import type { ProviderRegistry } from '../providers/provider.registry.js';
 import type { ModelRepository } from '../repositories/model.repository.js';
 import type { RequestRepository, RecordRequestInput } from '../repositories/request.repository.js';
 import type { AdmissionLease, RateLimitInput, RateLimitService } from './rate-limit.service.js';
 import type { ApiKeyContext } from '../middleware/api-key-auth.js';
+import type { Metrics } from '../metrics/registry.js';
 
 export interface ChatServiceDeps {
   config: AppConfig;
@@ -18,6 +20,8 @@ export interface ChatServiceDeps {
   providers: ProviderRegistry;
   requestsRepo: RequestRepository;
   rateLimiter: RateLimitService;
+  /** Optional: a caller that only needs completions need not build a registry. */
+  metrics?: Metrics;
 }
 
 export interface ResolvedChatRequest {
@@ -39,6 +43,14 @@ export interface ResolvedChatRequest {
   messages: ChatMessage[];
   stream: boolean;
   maxTokens: number | undefined;
+  /**
+   * The customer's tools, carried through untouched. They are deliberately
+   * NOT part of requestContent: that column stores what the customer sent for
+   * audit, and a 128-tool schema dump would push the actual conversation out
+   * of the captured prefix for no benefit.
+   */
+  tools: ChatTool[] | undefined;
+  toolChoice: ToolChoice | undefined;
   requestContent: string | null;
   /**
    * The rate-limit admission granted for this request. Whoever finishes the
@@ -67,16 +79,21 @@ export class ChatService {
    * A model that does not exist and a model the customer may not use both
    * return 404, so probing cannot enumerate the platform's model catalog.
    */
-  async resolveModel(ctx: ApiKeyContext, modelName: string) {
+  async resolveModel(ctx: ApiKeyContext, requestedName: string) {
+    // A customer may address a model by its display name ("GPT-6 Astra") or by
+    // its tier ("max"). Both resolve to the same row; everything downstream
+    // then works in public names only, so usage is recorded under one name and
+    // an alias cannot split a customer's history across two series.
+    const modelName = resolveModelAlias(requestedName);
     const model = await this.deps.models.findEnabled(modelName);
-    if (!model) throw notFound(`Model "${modelName}" does not exist or is not available`, 'invalid_model');
+    if (!model) throw notFound(`Model "${requestedName}" does not exist or is not available`, 'invalid_model');
     if (!model.providerEnabled) {
-      throw notFound(`Model "${modelName}" is not currently available`, 'invalid_model');
+      throw notFound(`Model "${modelExternalName(modelName)}" is not currently available`, 'invalid_model');
     }
 
     const allow = parseAllowedModels(ctx.limits.allowedModels);
     if (allow !== null && !allow.includes(modelName)) {
-      throw notFound(`Model "${modelName}" is not available on your plan`, 'invalid_model');
+      throw notFound(`Model "${modelExternalName(modelName)}" is not available on your plan`, 'invalid_model');
     }
     return model;
   }
@@ -101,9 +118,41 @@ export class ChatService {
     };
   }
 
+  /**
+   * Prepends the identity instruction to the conversation.
+   *
+   * Inserted as a system message ahead of everything the customer sent, so a
+   * caller-supplied system message cannot sit in front of it and undercut it.
+   * The customer's own system message is kept and follows ours, which preserves
+   * their intended behaviour while leaving our instruction with the leading
+   * position the model weights most heavily.
+   *
+   * Applied once in `prepare`, rather than at each call site, so the streaming
+   * and non-streaming paths cannot drift apart — they both read
+   * `resolved.messages`, and this is the only place that field is populated.
+   *
+   * The customer's own content is what gets recorded and billed as
+   * `requestContent`; the instruction is not part of what they sent, so it is
+   * not stored or counted as theirs.
+   */
+  private withIdentityInstruction(publicName: string, messages: ChatMessage[]): ChatMessage[] {
+    const instruction: ChatMessage = {
+      role: 'system',
+      content: buildIdentityInstruction(publicName),
+    };
+    return [instruction, ...messages];
+  }
+
   async prepare(
     ctx: ApiKeyContext,
-    body: { model: string; messages: ChatMessage[]; stream?: boolean; max_tokens?: number },
+    body: {
+      model: string;
+      messages: ChatMessage[];
+      stream?: boolean;
+      max_tokens?: number;
+      tools?: ChatTool[];
+      tool_choice?: ToolChoice;
+    },
   ): Promise<ResolvedChatRequest> {
     const model = await this.resolveModel(ctx, body.model);
     const provider = this.deps.providers.getOrThrow(model.provider);
@@ -120,9 +169,11 @@ export class ChatService {
       upstreamModel: model.upstreamModel,
       modelId: model.id,
       provider,
-      messages: body.messages,
+      messages: this.withIdentityInstruction(model.publicName, body.messages),
       stream,
       maxTokens: body.max_tokens,
+      tools: body.tools,
+      toolChoice: body.tool_choice,
       requestContent: this.captureContent(body.messages),
       lease,
     };
@@ -197,7 +248,32 @@ export class ChatService {
         code: 'upstream_rate_limited',
       });
     }
+    /**
+     * An upstream 401/403 is a misconfiguration, not a customer problem and
+     * not a network fault. This is what a missing or rejected UPSTREAM_API_KEY
+     * looks like, and it previously fell through to the generic 502 that reads
+     * like the provider was merely unavailable — which sent the operator
+     * looking at the network instead of at their own configuration.
+     *
+     * The message says what is wrong at the level an operator needs and stops
+     * there: no upstream body, no key, no header. The customer is told the
+     * service is misconfigured, which is the truth and is not a disclosure.
+     */
+    if (e?.httpStatus === 401 || e?.httpStatus === 403) {
+      this.deps.logger.error('Upstream rejected our credentials', {
+        provider: 'upstream',
+        httpStatus: e.httpStatus,
+      });
+      this.deps.metrics?.upstreamErrors.inc({ kind: 'authentication' });
+      return new HttpError({
+        statusCode: 502,
+        message: 'The upstream provider rejected our credentials. This is a server configuration issue.',
+        type: 'upstream_error',
+        code: 'upstream_authentication_failed',
+      });
+    }
     if (e?.httpStatus && e.httpStatus >= 500) {
+      this.deps.metrics?.upstreamErrors.inc({ kind: 'unavailable' });
       return new HttpError({
         statusCode: 502,
         message: 'The upstream provider is currently unavailable',
@@ -205,6 +281,7 @@ export class ChatService {
         code: 'upstream_unavailable',
       });
     }
+    this.deps.metrics?.upstreamErrors.inc({ kind: 'unknown' });
     // Never echo an arbitrary upstream message that we have not vetted.
     return new HttpError({
       statusCode: 502,
@@ -229,6 +306,8 @@ export class ChatService {
           messages: resolved.messages,
           stream: false,
           ...(resolved.maxTokens !== undefined ? { max_tokens: resolved.maxTokens } : {}),
+          ...(resolved.tools !== undefined ? { tools: resolved.tools } : {}),
+          ...(resolved.toolChoice !== undefined ? { tool_choice: resolved.toolChoice } : {}),
         },
         signal,
       );
@@ -242,6 +321,7 @@ export class ChatService {
       record.currency = result.usage.currency;
       record.latencyMs = result.latencyMs;
 
+      this.observeChat(resolved, 'success', result.latencyMs);
       await this.deps.requestsRepo.record(record);
       // The token increment is a single atomic Lua INCRBY, so concurrent
       // completions cannot lose an update and no read-modify-write lock is
@@ -252,7 +332,10 @@ export class ChatService {
       // The upstream echoes the id it was asked for. Rewrite it to the public
       // name so a client that sent `max` sees `max` come back, and the
       // provider's internal model naming stays an implementation detail.
-      return { body: { ...result.body, model: resolved.modelName }, httpStatus: 200 };
+      return {
+        body: this.maskUpstreamBranding(result.body, resolved.modelName),
+        httpStatus: 200,
+      };
     } catch (err) {
       const httpError = this.normalizeProviderError(err);
       record.status = signal.aborted ? 'cancelled' : 'error';
@@ -260,9 +343,80 @@ export class ChatService {
       record.errorType = httpError.type;
       record.errorCode = httpError.code;
       record.latencyMs = Date.now() - startedAt;
+      this.observeChat(
+        resolved,
+        signal.aborted ? 'cancelled' : 'error',
+        record.latencyMs,
+      );
       await this.recordQuietly(record, resolved);
       throw httpError;
     }
+  }
+
+  /**
+   * Rewrites the upstream's own branding in a response body before the client
+   * sees it.
+   *
+   * Two fields leak the provider, and they leak on different paths. `model` is
+   * rewritten on both. `message.name` is the one found during live testing: the
+   * upstream stamps its brand onto every assistant turn it produces, so a
+   * request that never mentioned identity came back stamped anyway. Rewriting
+   * `model` alone left the vendor plainly readable in the body.
+   *
+   * Only the first choice is walked, and only `name` is touched. A tool call's
+   * `function.name` is the customer's own tool, not ours to rename, and
+   * rewriting it would break the call.
+   */
+  private maskUpstreamBranding(
+    body: Record<string, unknown>,
+    publicName: string,
+  ): Record<string, unknown> {
+    // Not the display name: a caller that sent `max` must get `max` back.
+    // The public name is echoed as-is because a tier discloses nothing, and is
+    // replaced only on a row where it IS the internal id — the one case where
+    // echoing it would republish exactly what this masking exists to hide.
+    const masked: Record<string, unknown> = { ...body, model: modelResponseName(publicName) };
+    const choices = body.choices;
+    if (!Array.isArray(choices)) return masked;
+
+    masked.choices = choices.map((choice) => {
+      if (typeof choice !== 'object' || choice === null) return choice;
+      const c = choice as Record<string, unknown>;
+      const message = c.message;
+      if (typeof message !== 'object' || message === null) return choice;
+      const m = message as Record<string, unknown>;
+      const name = assistantDisplayName(m.name as string | undefined);
+      if (name === null || name === m.name) return choice;
+      return { ...c, message: { ...m, name } };
+    });
+    return masked;
+  }
+
+  /**
+   * Records one chat outcome in the metrics registry.
+   *
+   * Both the streaming and non-streaming paths call this, so a dashboard can
+   * compare the two without reasoning about which handler ran. `model` is the
+   * public tier name, never the upstream id, so an internal rename does not
+   * split a customer's history across two series.
+   */
+  private observeChat(
+    resolved: ResolvedChatRequest,
+    status: 'success' | 'error' | 'cancelled',
+    latencyMs: number,
+  ): void {
+    const metrics = this.deps.metrics;
+    if (!metrics) return;
+    const labels = {
+      model: resolved.modelName,
+      status,
+      stream: String(resolved.stream),
+    };
+    metrics.chatRequests.inc(labels);
+    metrics.chatDuration.observe(
+      { model: resolved.modelName, stream: String(resolved.stream) },
+      latencyMs / 1000,
+    );
   }
 
   /**
@@ -281,6 +435,7 @@ export class ChatService {
     record.errorCode = outcome.errorCode ?? null;
     record.errorType = outcome.errorCode ? 'upstream_error' : null;
     record.latencyMs = Date.now() - startedAt;
+    this.observeChat(resolved, outcome.status, record.latencyMs);
 
     if (outcome.usage) {
       record.promptTokens = outcome.usage.promptTokens;

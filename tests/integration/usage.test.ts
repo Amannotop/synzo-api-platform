@@ -277,9 +277,9 @@ describe('model allowlist (spec 50)', () => {
   it('hides a model outside the customer allowlist as 404', async () => {
     const c = await customer();
     const other = await customer();
-    const otherModel = other.client.json<{ models: { publicName: string }[] }>(
+    const otherModel = other.client.json<{ models: { addressable: string }[] }>(
       await other.client.get('/api/models'),
-    ).models[0].publicName;
+    ).models[0].addressable;
 
     await harness.sql`update customer_limits set allowed_models = ${JSON.stringify(['definitely-not-a-real-model'])} where user_id = ${c.userId}`;
 
@@ -289,9 +289,15 @@ describe('model allowlist (spec 50)', () => {
 
   it('serves a model inside the allowlist', async () => {
     const c = await customer();
-    const model = c.client.json<{ models: { publicName: string }[] }>(await c.client.get('/api/models'))
-      .models[0].publicName;
-    await harness.sql`update customer_limits set allowed_models = ${JSON.stringify([model])} where user_id = ${c.userId}`;
+    // The allowlist stores ROUTING KEYS, not display names, and the two differ:
+    // `max` is the key, `GPT-6 Astra` is what a customer sends. Both are sent
+    // here on purpose — the key goes in the allowlist, the display name goes in
+    // the request — so the test pins that a display name still resolves for a
+    // customer whose allowlist holds the key underneath it.
+    const model = c.client.json<{ models: { addressable: string }[] }>(await c.client.get('/api/models'))
+      .models[0].addressable;
+    const key = 'max';
+    await harness.sql`update customer_limits set allowed_models = ${JSON.stringify([key])} where user_id = ${c.userId}`;
 
     expect((await call(c.secret, { model })).statusCode).toBe(200);
   });
@@ -304,9 +310,9 @@ describe('model allowlist (spec 50)', () => {
    */
   it('an empty allowlist means NO models, consistently', async () => {
     const c = await customer();
-    const before = c.client.json<{ models: { publicName: string }[] }>(await c.client.get('/api/models'));
+    const before = c.client.json<{ models: { addressable: string }[] }>(await c.client.get('/api/models'));
     expect(before.models.length).toBeGreaterThan(0);
-    const model = before.models[0].publicName;
+    const model = before.models[0].addressable;
 
     await harness.sql`update customer_limits set allowed_models = ${JSON.stringify([])} where user_id = ${c.userId}`;
 
@@ -327,8 +333,69 @@ describe('model allowlist (spec 50)', () => {
     const c = await customer();
     await harness.sql`update customer_limits set allowed_models = NULL where user_id = ${c.userId}`;
 
-    const listed = c.client.json<{ models: { publicName: string }[] }>(await c.client.get('/api/models'));
+    const listed = c.client.json<{ models: { addressable: string }[] }>(await c.client.get('/api/models'));
     expect(listed.models.length).toBeGreaterThan(0);
-    expect((await call(c.secret, { model: listed.models[0].publicName })).statusCode).toBe(200);
+    expect((await call(c.secret, { model: listed.models[0].addressable })).statusCode).toBe(200);
+  });
+});
+
+/**
+ * The /api/usage response is a published contract, not an internal shape. The
+ * dashboard renders it directly, so a column-name or type drift between the
+ * repository and `UsagePoint`/`ModelUsage` is a customer-visible crash — the
+ * usage page went fully blank (root empty, navigation included) because
+ * `upstream_cost` came out of `numeric` as the JSON string "0.0000000000" and
+ * the chart code called `.toFixed` on it. TypeScript cannot catch that, because
+ * the repository and the dashboard are separate programs.
+ */
+describe('usage response shape (dashboard contract)', () => {
+  it('returns upstreamCost as a JSON number, never a string', async () => {
+    const c = await customer();
+    await call(c.secret);
+
+    const usage = c.client.json<{ byModel: { model: string; upstreamCost: unknown }[] }>(
+      await c.client.get('/api/usage?range=90d'),
+    );
+    expect(usage.byModel.length).toBeGreaterThan(0);
+    for (const row of usage.byModel) {
+      expect(typeof row.upstreamCost).toBe('number');
+      expect(Number.isFinite(row.upstreamCost as number)).toBe(true);
+    }
+  });
+
+  it('preserves a non-zero upstream cost through the aggregate', async () => {
+    harness.upstream.respondWith((_r, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+        usage: { total_tokens: 5 },
+        cost: '0.00123',
+      }));
+    });
+    const c = await customer();
+    await call(c.secret);
+
+    const usage = c.client.json<{ byModel: { upstreamCost: number }[] }>(
+      await c.client.get('/api/usage?range=90d'),
+    );
+    expect(usage.byModel[0]?.upstreamCost).toBeCloseTo(0.00123, 6);
+  });
+
+  it('names the series fields the charts read', async () => {
+    const c = await customer();
+    await call(c.secret);
+
+    const usage = c.client.json<{ series: Record<string, unknown>[] }>(
+      await c.client.get('/api/usage?range=90d'),
+    );
+    expect(usage.series.length).toBeGreaterThan(0);
+    // `date` drives the x-axis labels; `day` was what the repository returned,
+    // which left the charts with no axis at all.
+    for (const point of usage.series) {
+      expect(point).toHaveProperty('date');
+      expect(point).not.toHaveProperty('day');
+      expect(typeof point.date).toBe('string');
+      expect(Number.isNaN(new Date(point.date as string).getTime())).toBe(false);
+    }
   });
 });

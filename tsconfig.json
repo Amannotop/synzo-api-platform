@@ -2,13 +2,23 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "baseUrl": ".",
     "paths": {
-      "@synzo/types": ["packages/types/src/index.ts"],
-      "@synzo/validation": ["packages/validation/src/index.ts"],
-      "@synzo/config": ["packages/config/src/index.ts"],
-      "@synzo/database": ["packages/database/src/index.ts"]
+      "@synzo/types": [
+        "packages/types/src/index.ts"
+      ],
+      "@synzo/validation": [
+        "packages/validation/src/index.ts"
+      ],
+      "@synzo/config": [
+        "packages/config/src/index.ts"
+      ],
+      "@synzo/database": [
+        "packages/database/src/index.ts"
+      ]
     }
   },
   "include": [
@@ -17,5 +27,9 @@
     "packages/*/src/**/*.ts",
     "vitest.config.ts"
   ],
-  "exclude": ["node_modules", "**/dist/**", "apps/dashboard"]
+  "exclude": [
+    "node_modules",
+    "**/dist/**",
+    "apps/dashboard"
+  ]
 }
