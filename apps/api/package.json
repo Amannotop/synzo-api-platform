@@ -19,6 +19,7 @@
     "@synzo/database": "workspace:*",
     "@synzo/types": "workspace:*",
     "@synzo/validation": "workspace:*",
+    "dotenv": "^18.0.4",
     "drizzle-orm": "^0.38.3",
     "fastify": "^5.2.0",
     "ioredis": "^5.4.2",

@@ -63,6 +63,7 @@ export function buildChatRequestSchema(limits: ValidationLimits) {
             code: z.ZodIssueCode.too_big,
             path: ['messages', i, 'content'],
             maximum: limits.maxMessageChars,
+            inclusive: true,
             type: 'string',
             message: `messages[${i}].content exceeds ${limits.maxMessageChars} characters`,
           });

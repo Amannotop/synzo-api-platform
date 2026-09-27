@@ -1,4 +1,28 @@
+import { config as loadDotenv } from 'dotenv';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { z } from 'zod';
+
+/**
+ * Load .env from the repo root so the API, the migration runner and tests all
+ * resolve configuration identically. A missing file is fine in production,
+ * where real environment variables are injected by the platform.
+ */
+function bootstrapDotenv(): void {
+  if (process.env.NODE_ENV === 'production') return;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const root = resolve(here, '..', '..', '..');
+  const candidates = [resolve(root, '.env'), resolve(process.cwd(), '.env')];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      loadDotenv({ path: candidate, override: false, quiet: true });
+      return;
+    }
+  }
+}
+
+bootstrapDotenv();
 
 /**
  * Booleans in .env files are always strings. "false" must not become true.
@@ -74,8 +98,9 @@ const envSchema = z.object({
   LOGIN_LOCKOUT_SECONDS: intFromEnv(1, 86_400).default(900),
 
   // Admin bootstrap
-  ADMIN_EMAIL: z.string().email().optional(),
-  ADMIN_PASSWORD: z.string().optional(),
+  // Empty string means "unset", consistent with every other optional secret.
+  ADMIN_EMAIL: optionalSecret.pipe(z.string().email().optional()),
+  ADMIN_PASSWORD: optionalSecret,
 
   CORS_ORIGINS: z.string().default(''),
   TRUST_PROXY: boolFromString.default('false'),
@@ -97,7 +122,48 @@ const envSchema = z.object({
 });
 
 export type Env = z.infer<typeof envSchema>;
-export type AppConfig = ReturnType<typeof buildConfig>;
+export interface AppConfig {
+  env: string;
+  isProduction: boolean;
+  isTest: boolean;
+  port: number;
+  host: string;
+  logLevel: 'debug' | 'info' | 'warn' | 'error';
+  databaseUrl: string;
+  databasePoolMax: number;
+  redisUrl: string;
+  upstream: {
+    baseUrl: string;
+    chatPath: string;
+    modelsPath: string;
+    apiKey: string | undefined;
+    connectTimeoutMs: number;
+    requestTimeoutMs: number;
+    streamTimeoutMs: number;
+    maxRetries: number;
+  };
+  defaultModel: string;
+  defaults: { requestsPerMinute: number; requestsPerDay: number; tokensPerDay: number; maxConcurrentRequests: number };
+  limits: { maxBodyBytes: number; maxMessages: number; maxMessageChars: number; maxContentTokensHardCap: number };
+  security: {
+    apiKeyPepper: string;
+    sessionSecret: string;
+    sessionTtlHours: number;
+    sessionCookieName: string;
+    sessionCookieSecure: boolean;
+    scryptN: number;
+    passwordMaxLength: number;
+    trustProxy: boolean;
+  };
+  bruteForce: { maxAttempts: number; attemptWindowSeconds: number; lockoutSeconds: number };
+  admin: { email: string | undefined; password: string | undefined };
+  cors: { allowList: string[]; allowCredentials: boolean };
+  dashboardOrigin: string;
+  logging: { level: string; logRequestContent: boolean; logRequestContentMaxChars: number };
+  providerHealth: { enabled: boolean; intervalMs: number };
+  features: { registrationEnabled: boolean; allowLiveKeys: boolean };
+}
+
 
 export interface CorsOrigins {
   allowList: string[];
