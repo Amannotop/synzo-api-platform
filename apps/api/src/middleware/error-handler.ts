@@ -34,7 +34,13 @@ export function registerErrorHandler(app: FastifyInstance, logger: Logger): void
         error: { message: 'Request body is too large', type: 'invalid_request_error', code: 'payload_too_large' },
       });
     }
-    if (code === 'FST_ERR_CTP_EMPTY_JSON_BODY' || error instanceof SyntaxError) {
+    // FST_ERR_CTP_INVALID_JSON_BODY is what Fastify 5 raises for a truncated or
+    // otherwise malformed body; EMPTY_JSON_BODY covers a completely empty one.
+    if (
+      code === 'FST_ERR_CTP_EMPTY_JSON_BODY' ||
+      code === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
+      error instanceof SyntaxError
+    ) {
       return reply.status(400).send({
         error: { message: 'Request body is not valid JSON', type: 'invalid_request_error', code: 'invalid_json' },
       });

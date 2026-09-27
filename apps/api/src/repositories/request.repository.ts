@@ -182,6 +182,52 @@ export class RequestRepository {
     };
   }
 
+  /**
+   * Platform-wide totals for the admin dashboard. Deliberately NOT tenant
+   * scoped — this is the only place a cross-customer aggregate is read, and it
+   * returns sums only, never another customer's request content or keys.
+   */
+  async platformTotals() {
+    const rows = await this.db
+      .select({
+        total: sql<number>`count(*)::int`,
+        successful: sql<number>`count(*) filter (where ${requests.status} = 'success')::int`,
+        failed: sql<number>`count(*) filter (where ${requests.status} = 'error')::int`,
+        totalTokens: sql<number>`coalesce(sum(${requests.totalTokens}), 0)::int`,
+        avgLatency: sql<number>`coalesce(avg(${requests.latencyMs}), 0)::int`,
+        upstreamCost: sql<string>`coalesce(sum(${requests.upstreamCost}), 0)::text`,
+      })
+      .from(requests);
+    const r = rows[0];
+    return {
+      totalRequests: r?.total ?? 0,
+      successfulRequests: r?.successful ?? 0,
+      failedRequests: r?.failed ?? 0,
+      totalTokens: r?.totalTokens ?? 0,
+      avgLatencyMs: r?.avgLatency ?? 0,
+      upstreamCost: Number(r?.upstreamCost ?? 0),
+    };
+  }
+
+  /** Most recent errors across all customers, metadata only. */
+  async recentErrors(limit = 50) {
+    return this.db
+      .select({
+        requestId: requests.requestId,
+        createdAt: requests.createdAt,
+        model: requests.modelName,
+        provider: requests.provider,
+        httpStatus: requests.httpStatus,
+        errorType: requests.errorType,
+        errorCode: requests.errorCode,
+        latencyMs: requests.latencyMs,
+      })
+      .from(requests)
+      .where(eq(requests.status, 'error'))
+      .orderBy(desc(requests.createdAt))
+      .limit(limit);
+  }
+
   /** Per-day series for the usage charts (§25, §27). */
   async dailySeries(userId: string, from: Date, to: Date) {
     return this.db

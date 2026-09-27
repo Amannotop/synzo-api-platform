@@ -11,6 +11,8 @@ export interface SessionUser {
   name: string;
   role: string;
   sessionId: string;
+  unlimitedMode: boolean;
+  allowLiveKeys: boolean;
 }
 
 declare module 'fastify' {
@@ -80,6 +82,8 @@ export function createSessionResolver(sessions: SessionRepository) {
       name: resolved.name,
       role: resolved.role,
       sessionId: resolved.sessionId,
+      unlimitedMode: resolved.unlimitedMode,
+      allowLiveKeys: resolved.allowLiveKeys,
     };
   };
 }

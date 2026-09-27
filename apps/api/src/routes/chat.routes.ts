@@ -123,19 +123,24 @@ async function streamResponse(
       controller.signal,
     );
 
-    // Pipe frame by frame with no buffering and backpressure awareness.
-    for await (const frame of iterator) {
+    // Drive the iterator manually rather than with `for await...of`.
+    // `for await` calls generator.return() on normal completion, which throws
+    // away the return value — and that value is where the collected stream
+    // usage lives, so accounting would silently record nothing.
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) {
+        usage = next.value ?? null;
+        break;
+      }
       if (controller.signal.aborted) break;
+      const frame = next.value;
       const ok = raw.write(frame);
       if (!ok) {
         // Respect backpressure: wait for drain before pulling the next frame.
         await new Promise<void>((resolve) => raw.once('drain', resolve));
       }
     }
-    // Drive the generator to completion so its `return` value (collected usage)
-    // is available for accounting.
-    const final = await iterator.next();
-    usage = final.done ? (final.value ?? null) : null;
   } catch (err) {
     if (controller.signal.aborted) {
       outcome = 'cancelled';
