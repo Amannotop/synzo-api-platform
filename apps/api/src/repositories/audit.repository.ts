@@ -1,4 +1,4 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import type { Database } from '@synzo/database';
 import { auditLogs } from '@synzo/database';
 

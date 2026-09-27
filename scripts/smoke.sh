@@ -51,7 +51,9 @@ def dig(o,p):
 print(dig(d,'$1') if dig(d,'$1') is not None else '')" 2>/dev/null; }
 
 EMAIL="smoke+$(date +%s)@synzo.dev"
-PASSWORD="CorrectHorseBattery9"
+# Generated per run so no realistic password is stored in the repository.
+# Registration requires >= 10 characters, so the entropy is plenty.
+PASSWORD="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-22)"
 
 step "1. Register customer"
 req POST "$BASE/api/auth/register" \
@@ -242,7 +244,75 @@ OUT=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions
   -d '{"model":"space-bunny-free","messages":[{"role":"user","content":"hi"}]}')
 check "revoked key rejected on chat" 401 "$OUT" "$OUT"
 
-step "17. Error responses leak nothing"
+step "17. Expired API key is rejected"
+req POST "$BASE/api/projects" '{"name":"Expiry Project"}' >/dev/null
+EXP_PROJECT=$(printf '%s' "$(body)" | jget project.id)
+req POST "$BASE/api/keys" \
+  "{\"name\":\"Expiring\",\"projectId\":\"$EXP_PROJECT\",\"environment\":\"test\"}"
+EXPIRED_KEY=$(printf '%s' "$(body)" | jget secret)
+# Force expiry directly in the database: a 1-day key cannot be waited out in a
+# test, and this asserts the auth middleware honours the stored expires_at.
+PSQL_URL=$(python3 -c "import re,pathlib;print(re.search(r'^DATABASE_URL=(.*)$',pathlib.Path('.env').read_text(),re.M).group(1).strip())" 2>/dev/null)
+if [ -n "$PSQL_URL" ] && command -v psql >/dev/null 2>&1 && [ -n "$EXPIRED_KEY" ]; then
+  HASH=$(printf '%s' "$EXPIRED_KEY" | python3 -c "import sys,hmac,hashlib,re,pathlib
+pepper=re.search(r'^API_KEY_PEPPER=(.*)$',pathlib.Path('.env').read_text(),re.M).group(1).strip()
+print(hmac.new(pepper.encode(),sys.stdin.read().strip().encode(),hashlib.sha256).hexdigest())")
+  psql "$PSQL_URL" -q -c \
+    "UPDATE api_keys SET expires_at = now() - interval '1 day' WHERE key_hash = '$HASH'" >/dev/null 2>&1
+  OUT=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/v1/models" -H "Authorization: Bearer $EXPIRED_KEY")
+  check "expired key rejected" 401 "$OUT" "$OUT"
+else
+  printf '  \033[33mSKIP\033[0m expired key (no DATABASE_URL/psql available)\n'
+fi
+
+step "18. Concurrency limit is enforced"
+# A fresh key isolates this counter from the earlier requests.
+req POST "$BASE/api/keys" \
+  "{\"name\":\"Concurrency\",\"projectId\":\"$PROJECT_ID\",\"environment\":\"test\"}"
+CONC_KEY=$(printf '%s' "$(body)" | jget secret)
+# Fire several chat requests at once; at least one must be shed with 429 when
+# max_concurrent_requests is exceeded.
+# Read the real limit from the database so the test adapts to any deployment
+# rather than assuming a default, then send comfortably more than that.
+CONC_LIMIT=$(psql "$PSQL_URL" -tAq -c \
+  "SELECT max_concurrent_requests FROM customer_limits WHERE user_id = '$USER_ID'" 2>/dev/null | tr -d ' ')
+[ -z "$CONC_LIMIT" ] && CONC_LIMIT=10
+CONC_N=$(( CONC_LIMIT + 4 ))
+printf '  info max_concurrent_requests=%s, sending %s concurrent requests\n' "$CONC_LIMIT" "$CONC_N"
+CONC_CODES=""
+for i in $(seq 1 "$CONC_N"); do
+  ( curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
+      -H "Authorization: Bearer $CONC_KEY" -H 'Content-Type: application/json' \
+      -d '{"model":"space-bunny-free","messages":[{"role":"user","content":"say hi"}]}' \
+      > "$WORK/conc.$i" ) &
+done
+wait
+for i in $(seq 1 "$CONC_N"); do CONC_CODES="$CONC_CODES $(cat "$WORK/conc.$i" 2>/dev/null)"; done
+printf '  info concurrent status codes:%s\n' "$CONC_CODES"
+if printf '%s' "$CONC_CODES" | grep -q 429; then
+  ok "concurrency limit sheds load with 429"
+else
+  bad "concurrency limit did not engage (no 429 across $CONC_N requests)"
+fi
+
+step "19. Disabled key is rejected, re-enable restores it"
+req POST "$BASE/api/keys" \
+  "{\"name\":\"Toggle\",\"projectId\":\"$PROJECT_ID\",\"environment\":\"test\"}"
+TOGGLE_KEY=$(printf '%s' "$(body)" | jget secret)
+TOGGLE_ID=$(printf '%s' "$(body)" | jget key.id)
+req POST "$BASE/api/keys/$TOGGLE_ID/status" '{"status":"disabled"}'
+check "disable key" 200 "$(status)" "$(body)"
+OUT=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/v1/models" -H "Authorization: Bearer $TOGGLE_KEY")
+check "disabled key rejected" 401 "$OUT" "$OUT"
+req POST "$BASE/api/keys/$TOGGLE_ID/status" '{"status":"active"}'
+OUT=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/v1/models" -H "Authorization: Bearer $TOGGLE_KEY")
+check "re-enabled key works" 200 "$OUT" "$OUT"
+# A revoked key must not be re-enabled (§5).
+req POST "$BASE/api/keys/$TOGGLE_ID/revoke" '{}'
+req POST "$BASE/api/keys/$TOGGLE_ID/status" '{"status":"active"}'
+check "revoked key cannot be re-enabled" 409 "$(status)" "$(body)"
+
+step "20. Error responses leak nothing"
 req GET "$BASE/api/does-not-exist"
 BODY=$(body)
 check "unknown route 404" 404 "$(status)" "$BODY"

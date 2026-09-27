@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { adminUpdateLimitsSchema, adminUpdateUserSchema } from '@synzo/validation';
 import { badRequest, conflict, notFoundOrForbidden } from '../lib/errors.js';
 import { requireAdmin } from '../middleware/session-auth.js';
@@ -19,6 +19,38 @@ interface AdminDeps {
 function fail(issues: { message: string; path: (string | number)[] }[]): never {
   const first = issues[0];
   throw badRequest(first?.message ?? 'Invalid request', 'invalid_request', first?.path.join('.') || undefined);
+}
+
+/**
+ * The stored allowlist is a JSON string; the API always speaks arrays so the
+ * dashboard never has to parse (or guess at) a string shape. A malformed
+ * stored value becomes an empty allowlist rather than a 500.
+ */
+function presentLimits(limits: {
+  userId: string;
+  requestsPerMinute: number;
+  requestsPerDay: number;
+  tokensPerDay: number;
+  maxConcurrentRequests: number;
+  allowedModels: string | null;
+}) {
+  let allowedModels: string[] | null = null;
+  if (limits.allowedModels) {
+    try {
+      const parsed: unknown = JSON.parse(limits.allowedModels);
+      allowedModels = Array.isArray(parsed) ? parsed.map(String) : null;
+    } catch {
+      allowedModels = null;
+    }
+  }
+  return {
+    userId: limits.userId,
+    requestsPerMinute: limits.requestsPerMinute,
+    requestsPerDay: limits.requestsPerDay,
+    tokensPerDay: limits.tokensPerDay,
+    maxConcurrentRequests: limits.maxConcurrentRequests,
+    allowedModels,
+  };
 }
 
 function meta(request: FastifyRequest) {
@@ -77,8 +109,9 @@ async function registerRoutes(app: FastifyInstance, deps: AdminDeps): Promise<vo
 
   app.get('/api/admin/customers/:id/limits', async (request: FastifyRequest) => {
     const { id } = request.params as { id: string };
-    const limits = await deps.users.getLimits(id);
-    return { limits };
+    const target = await deps.users.findById(id);
+    if (!target) throw notFoundOrForbidden();
+    return { limits: presentLimits(await deps.users.getLimits(id)) };
   });
 
   app.patch('/api/admin/customers/:id/limits', async (request: FastifyRequest) => {
@@ -90,16 +123,25 @@ async function registerRoutes(app: FastifyInstance, deps: AdminDeps): Promise<vo
     const target = await deps.users.findById(id);
     if (!target) throw notFoundOrForbidden();
 
-    await deps.users.updateLimits(id, parsed.data);
+    // The allowlist is a JSON array in the database; the wire format is an
+    // array so the dashboard does not have to hand-roll JSON.parse.
+    const { allowedModels, ...numeric } = parsed.data;
+    const fields: Parameters<UserRepository['updateLimits']>[1] = {
+      ...numeric,
+      ...(allowedModels !== undefined
+        ? { allowedModels: allowedModels === null ? null : JSON.stringify(allowedModels) }
+        : {}),
+    };
+    await deps.users.updateLimits(id, fields);
     await deps.audit.record({
       actorUserId: admin.userId,
       action: 'admin.limits_changed',
       resourceType: 'user',
       resourceId: id,
-      metadata: { ...parsed.data },
+      metadata: fields,
       ...meta(request),
     });
-    return { limits: await deps.users.getLimits(id) };
+    return { limits: presentLimits(await deps.users.getLimits(id)) };
   });
 
   app.patch('/api/admin/customers/:id', async (request: FastifyRequest) => {

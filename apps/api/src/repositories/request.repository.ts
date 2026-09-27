@@ -1,6 +1,6 @@
-import { and, count, desc, eq, gte, lte, sql, sum } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import type { Database } from '@synzo/database';
-import { models, requests, usageDaily } from '@synzo/database';
+import { requests, usageDaily } from '@synzo/database';
 
 export interface RecordRequestInput {
   requestId: string;

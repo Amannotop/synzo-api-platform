@@ -9,17 +9,33 @@ import { requireSession } from '../middleware/session-auth.js';
 import type { UserRepository } from '../repositories/user.repository.js';
 import type { SessionRepository } from '../repositories/session.repository.js';
 import type { AuditRepository } from '../repositories/audit.repository.js';
-import type { Logger } from '../lib/logger.js';
 import type { Redis } from 'ioredis';
+import type { RateLimitService } from '../services/rate-limit.service.js';
 
 interface AuthDeps {
   config: AppConfig;
-  logger: Logger;
   users: UserRepository;
   sessions: SessionRepository;
   sessionService: SessionService;
   audit: AuditRepository;
   redis: Redis;
+  rateLimiter: RateLimitService;
+}
+
+/**
+ * allowed_models is stored as a JSON array string. A malformed or empty value
+ * means "every enabled model" rather than locking the customer out of all of
+ * them.
+ */
+function parseAllowedModels(raw: string | null | undefined): string[] | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    return parsed.map(String);
+  } catch {
+    return null;
+  }
 }
 
 function meta(request: FastifyRequest) {
@@ -30,7 +46,7 @@ function meta(request: FastifyRequest) {
 }
 
 export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): Promise<void> {
-  const { config, users, sessions, sessionService, audit, redis, logger } = deps;
+  const { config, users, sessions, sessionService, audit, redis, rateLimiter } = deps;
 
   /**
    * Brute-force protection keyed by email+IP (§31). A successful login clears
@@ -192,7 +208,10 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
     const user = requireSession(request);
     const record = await users.findById(user.userId);
     if (!record) throw notFound('Account not found');
-    const limits = await users.getLimits(user.userId);
+    const [limits, tokenUsage] = await Promise.all([
+      users.getLimits(user.userId),
+      rateLimiter.tokenUsage(user.userId),
+    ]);
     return {
       user: {
         id: record.id,
@@ -211,8 +230,13 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
         requestsPerDay: limits.requestsPerDay,
         tokensPerDay: limits.tokensPerDay,
         maxConcurrentRequests: limits.maxConcurrentRequests,
-        allowedModels: limits.allowedModels,
+        // Always an array on the wire; the JSON-string storage detail is not
+        // the customer's problem.
+        allowedModels: parseAllowedModels(limits.allowedModels),
       },
+      // Today's consumption, so the dashboard can show real quota progress
+      // instead of a number the customer has to guess at.
+      usage: { tokensToday: tokenUsage.customer },
     };
   });
 

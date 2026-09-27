@@ -133,6 +133,7 @@ export class OpenCodeProvider implements AIProvider {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let bodyError: unknown = null;
 
       try {
         for (;;) {
@@ -177,6 +178,17 @@ export class OpenCodeProvider implements AIProvider {
             }
           }
         }
+      } catch (err) {
+        // An upstream that hard-closes the socket mid-body surfaces here as a
+        // TypeError from undici, NOT as a clean end-of-stream. It has to be
+        // handled explicitly, or the client sees a broken response instead of
+        // a well-formed one.
+        //
+        // Our own timeout and the client's own abort are different: those must
+        // keep rejecting, because the caller has to turn them into a 504 or a
+        // cancellation record rather than pretend the stream completed.
+        if (combined.aborted) throw err;
+        bodyError = err;
       } finally {
         // Client disconnect or timeout aborts the upstream fetch rather than
         // letting it keep streaming into a dead socket (§16).
@@ -184,12 +196,18 @@ export class OpenCodeProvider implements AIProvider {
         reader.releaseLock();
       }
 
-      // Stream ended without [DONE] (upstream disconnect).
+      // Stream ended without [DONE], either cleanly or because the upstream
+      // dropped the connection. Upstream ended without a terminator; synthesize
+      // one so the client still sees a well-formed stream (§55).
       if (!sawDoneFrame) {
-        // Upstream ended without a terminator; synthesize one so the client
-        // still sees a well-formed stream.
         collector.markDone();
         yield 'data: [DONE]\n\n';
+      }
+      // A truncated body is reported through the usage it did produce. The
+      // customer can see the token cost of the part they received, which is
+      // more useful than discarding an accurate count.
+      if (bodyError) {
+        this.logStreamTruncation(bodyError);
       }
       return collector.result();
     } finally {
@@ -208,7 +226,7 @@ export class OpenCodeProvider implements AIProvider {
     let message = 'The upstream provider returned an error';
     let code = 'upstream_error';
     let type = 'upstream_error';
-    let retryable = res.status >= 500 || res.status === 429;
+    const retryable = res.status >= 500 || res.status === 429;
 
     try {
       const body = (await res.json()) as Record<string, unknown>;
@@ -247,6 +265,17 @@ export class OpenCodeProvider implements AIProvider {
     safe.type = type;
     safe.retryable = retryable;
     return safe;
+  }
+
+  /** A truncated stream is worth an operational signal, not a customer error. */
+  private logStreamTruncation(err: unknown): void {
+    // Deliberately not a throw: the customer's stream is already well-formed.
+    // Surfaced on stderr rather than through the logger, which this provider
+    // does not take, so the failure is still visible in container logs.
+    const message = err instanceof Error ? err.message : 'unknown';
+    process.stderr.write(
+      `${JSON.stringify({ level: 'warn', msg: 'Upstream stream ended early', error: message })}\n`,
+    );
   }
 
   async healthCheck(signal: AbortSignal): Promise<ProviderHealth> {

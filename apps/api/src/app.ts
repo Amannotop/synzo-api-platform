@@ -51,7 +51,6 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
     logger: false, // we emit structured JSON ourselves
     trustProxy: config.security.trustProxy,
     bodyLimit: config.limits.maxBodyBytes,
-    disableRequestLogging: true, // never log Authorization or bodies
     genReqId: () => `req_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`,
   });
 
@@ -84,7 +83,7 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
 
   // Services
   const providers = new ProviderRegistry(config);
-  const rateLimiter = new RateLimitService(redis, config, logger);
+  const rateLimiter = new RateLimitService(redis, logger);
   const sessionService = new SessionService(config, sessions);
   const health = new ProviderHealthMonitor(config, providers, logger);
   const chatService = new ChatService({
@@ -97,12 +96,12 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
   });
 
   // Attach the authenticated session to every request before routing.
-  const resolveSession = createSessionResolver(sessions);
+  const resolveSession = createSessionResolver(sessions, config.security.sessionCookieName);
   app.addHook('preHandler', resolveSession);
 
   await registerSystemRoutes(app, { config, db, redis, models, apiKeys, users, health });
   await registerChatRoutes(app, { config, logger, chatService, apiKeys, users, models });
-  await registerAuthRoutes(app, { config, logger, users, sessions, sessionService, audit, redis });
+  await registerAuthRoutes(app, { config, users, sessions, sessionService, audit, redis, rateLimiter });
   await registerCustomerRoutes(app, { config, projects, apiKeys, requestsRepo, users, audit, models });
   await registerAdminRoutes(app, { users, models, requestsRepo, audit, health });
 

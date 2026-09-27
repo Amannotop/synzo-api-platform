@@ -1,13 +1,28 @@
 import { z } from 'zod';
 
+/**
+ * Email normalization happens BEFORE validation. Zod applies string checks in
+ * chain order, so `.email().trim()` would validate the raw input and reject a
+ * perfectly good address that merely has surrounding whitespace, while
+ * `.trim().email()` would validate the trimmed value. Trimming first also
+ * guarantees the unique index sees one canonical form, so `A@b.com` and
+ * `a@b.com` cannot both register (§4).
+ */
+const emailSchema = z
+  .string()
+  .trim()
+  .max(320, 'email must be at most 320 characters')
+  .toLowerCase()
+  .pipe(z.string().email('a valid email is required'));
+
 export const registerSchema = z.object({
-  email: z.string().email('a valid email is required').max(320).toLowerCase().trim(),
+  email: emailSchema,
   password: z.string().min(10, 'password must be at least 10 characters'),
-  name: z.string().min(1, 'name is required').max(120),
+  name: z.string().trim().min(1, 'name is required').max(120),
 });
 
 export const loginSchema = z.object({
-  email: z.string().email().max(320).toLowerCase().trim(),
+  email: emailSchema,
   password: z.string().min(1, 'password is required'),
 });
 
@@ -63,8 +78,11 @@ export const adminUpdateLimitsSchema = z
     requestsPerDay: z.coerce.number().int().min(1).max(1_000_000_000).optional(),
     tokensPerDay: z.coerce.number().int().min(1).max(10_000_000_000).optional(),
     maxConcurrentRequests: z.coerce.number().int().min(1).max(10_000).optional(),
-    unlimitedMode: z.boolean().optional(),
-    allowLiveKeys: z.boolean().optional(),
+    /**
+     * §50 makes the model allowlist admin-configurable. Stored as a JSON array
+     * of public names; `null` means "every enabled model".
+     */
+    allowedModels: z.array(z.string().min(1).max(200)).max(200).nullable().optional(),
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), {
     message: 'at least one limit must be provided',

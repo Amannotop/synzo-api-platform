@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '@synzo/config';
 import type { ChatMessage } from '@synzo/types';
-import { HttpError, badRequest, notFound, upstreamTimeout } from '../lib/errors.js';
+import { HttpError, notFound, upstreamTimeout } from '../lib/errors.js';
 import type { Logger } from '../lib/logger.js';
 import type { AIProvider, NormalizedUsage } from '../providers/provider.interface.js';
 import type { ProviderRegistry } from '../providers/provider.registry.js';
 import type { ModelRepository } from '../repositories/model.repository.js';
 import type { RequestRepository, RecordRequestInput } from '../repositories/request.repository.js';
-import type { RateLimitService } from './rate-limit.service.js';
+import type { AdmissionLease, RateLimitInput, RateLimitService } from './rate-limit.service.js';
 import type { ApiKeyContext } from '../middleware/api-key-auth.js';
 
 export interface ChatServiceDeps {
@@ -28,6 +28,12 @@ export interface ResolvedChatRequest {
   stream: boolean;
   maxTokens: number | undefined;
   requestContent: string | null;
+  /**
+   * The rate-limit admission granted for this request. Whoever finishes the
+   * request (success, error, or client disconnect) must release it exactly
+   * once; `release()` is idempotent so overlapping paths are safe.
+   */
+  lease: AdmissionLease;
 }
 
 export function generateRequestId(): string {
@@ -80,6 +86,18 @@ export class ChatService {
     return serialized.slice(0, logRequestContentMaxChars);
   }
 
+  private limitInput(ctx: ApiKeyContext): RateLimitInput {
+    return {
+      userId: ctx.userId,
+      apiKeyId: ctx.keyId,
+      requestsPerMinute: ctx.limits.requestsPerMinute,
+      requestsPerDay: ctx.limits.requestsPerDay,
+      tokensPerDay: ctx.limits.tokensPerDay,
+      maxConcurrentRequests: ctx.limits.maxConcurrentRequests,
+      unlimited: ctx.unlimited,
+    };
+  }
+
   async prepare(
     ctx: ApiKeyContext,
     body: { model: string; messages: ChatMessage[]; stream?: boolean; max_tokens?: number },
@@ -88,15 +106,10 @@ export class ChatService {
     const provider = this.deps.providers.getOrThrow(model.provider);
     const stream = body.stream === true;
 
-    await this.deps.rateLimiter.checkAndConsume({
-      userId: ctx.userId,
-      apiKeyId: ctx.keyId,
-      requestsPerMinute: ctx.limits.requestsPerMinute,
-      requestsPerDay: ctx.limits.requestsPerDay,
-      tokensPerDay: ctx.limits.tokensPerDay,
-      maxConcurrentRequests: ctx.limits.maxConcurrentRequests,
-      unlimited: ctx.unlimited,
-    });
+    // Admission is the LAST thing prepare does. If the model is unknown the
+    // customer is not charged a rate-limit slot for a request that could
+    // never have been served.
+    const lease = await this.deps.rateLimiter.checkAndConsume(this.limitInput(ctx));
 
     return {
       requestId: generateRequestId(),
@@ -107,21 +120,21 @@ export class ChatService {
       stream,
       maxTokens: body.max_tokens,
       requestContent: this.captureContent(body.messages),
+      lease,
     };
   }
 
   /**
-   * Releases the concurrency slot acquired in `prepare`. Safe to call more than
-   * once; the limiter treats a negative counter as zero.
+   * Releases the admission taken in `prepare`. Safe to call more than once and
+   * safe for unlimited customers, who hold no slots at all.
    */
-  async release(ctx: ApiKeyContext): Promise<void> {
-    await this.deps.rateLimiter.releaseConcurrency(ctx.keyId);
+  async release(resolved: ResolvedChatRequest): Promise<void> {
+    await resolved.lease.release();
   }
 
   private baseRecord(
     ctx: ApiKeyContext,
     resolved: ResolvedChatRequest,
-    startedAt: number,
   ): RecordRequestInput {
     return {
       requestId: resolved.requestId,
@@ -145,7 +158,10 @@ export class ChatService {
   }
 
   /** Records a failed request. Never throws — accounting must not mask the real error. */
-  private async recordQuietly(record: RecordRequestInput, ctx: ApiKeyContext): Promise<void> {
+  private async recordQuietly(
+    record: RecordRequestInput,
+    resolved: ResolvedChatRequest,
+  ): Promise<void> {
     try {
       await this.deps.requestsRepo.record(record);
     } catch (err) {
@@ -154,7 +170,7 @@ export class ChatService {
         error: err instanceof Error ? err.message : 'unknown',
       });
     } finally {
-      await this.deps.rateLimiter.releaseConcurrency(ctx.keyId);
+      await resolved.lease.release();
     }
   }
 
@@ -200,7 +216,7 @@ export class ChatService {
     signal: AbortSignal,
   ): Promise<{ body: Record<string, unknown>; httpStatus: number }> {
     const startedAt = Date.now();
-    const record = this.baseRecord(ctx, resolved, startedAt);
+    const record = this.baseRecord(ctx, resolved);
 
     try {
       const result = await resolved.provider.chat(
@@ -223,22 +239,11 @@ export class ChatService {
       record.latencyMs = result.latencyMs;
 
       await this.deps.requestsRepo.record(record);
-      await this.deps.rateLimiter.withTokenLock(ctx.keyId, () =>
-        this.deps.rateLimiter.recordTokens(
-          {
-            userId: ctx.userId,
-            apiKeyId: ctx.keyId,
-            requestsPerMinute: ctx.limits.requestsPerMinute,
-            requestsPerDay: ctx.limits.requestsPerDay,
-            tokensPerDay: ctx.limits.tokensPerDay,
-            maxConcurrentRequests: ctx.limits.maxConcurrentRequests,
-            unlimited: ctx.unlimited,
-          },
-          result.usage.totalTokens,
-        ),
-      );
-      // Release via releaseConcurrency exactly once on the success path too.
-      await this.deps.rateLimiter.releaseConcurrency(ctx.keyId);
+      // The token increment is a single atomic Lua INCRBY, so concurrent
+      // completions cannot lose an update and no read-modify-write lock is
+      // needed around it.
+      await this.deps.rateLimiter.recordTokens(this.limitInput(ctx), result.usage.totalTokens);
+      await resolved.lease.release();
 
       return { body: result.body, httpStatus: 200 };
     } catch (err) {
@@ -248,7 +253,7 @@ export class ChatService {
       record.errorType = httpError.type;
       record.errorCode = httpError.code;
       record.latencyMs = Date.now() - startedAt;
-      await this.recordQuietly(record, ctx);
+      await this.recordQuietly(record, resolved);
       throw httpError;
     }
   }
@@ -263,7 +268,7 @@ export class ChatService {
     outcome: { usage: NormalizedUsage | null; status: 'success' | 'error' | 'cancelled'; errorCode?: string },
     startedAt: number,
   ): Promise<void> {
-    const record = this.baseRecord(ctx, resolved, startedAt);
+    const record = this.baseRecord(ctx, resolved);
     record.status = outcome.status;
     record.httpStatus = outcome.status === 'success' ? 200 : outcome.status === 'cancelled' ? 499 : 502;
     record.errorCode = outcome.errorCode ?? null;
@@ -282,20 +287,7 @@ export class ChatService {
       await this.deps.requestsRepo.record(record);
       const streamUsage = outcome.usage;
       if (streamUsage?.totalTokens) {
-        await this.deps.rateLimiter.withTokenLock(ctx.keyId, () =>
-          this.deps.rateLimiter.recordTokens(
-            {
-              userId: ctx.userId,
-              apiKeyId: ctx.keyId,
-              requestsPerMinute: ctx.limits.requestsPerMinute,
-              requestsPerDay: ctx.limits.requestsPerDay,
-              tokensPerDay: ctx.limits.tokensPerDay,
-              maxConcurrentRequests: ctx.limits.maxConcurrentRequests,
-              unlimited: ctx.unlimited,
-            },
-            streamUsage.totalTokens,
-          ),
-        );
+        await this.deps.rateLimiter.recordTokens(this.limitInput(ctx), streamUsage.totalTokens);
       }
     } catch (err) {
       this.deps.logger.error('Failed to record stream outcome', {
@@ -303,7 +295,7 @@ export class ChatService {
         error: err instanceof Error ? err.message : 'unknown',
       });
     } finally {
-      await this.deps.rateLimiter.releaseConcurrency(ctx.keyId);
+      await resolved.lease.release();
     }
   }
 }

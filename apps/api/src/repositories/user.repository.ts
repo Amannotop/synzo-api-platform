@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import type { Database } from '@synzo/database';
-import { customerLimits, users } from '@synzo/database';
+import { customerLimits, users, type CustomerLimits } from '@synzo/database';
 import type { AppConfig } from '@synzo/config';
 
 export class UserRepository {
@@ -117,25 +117,28 @@ export class UserRepository {
    * Effective limits for a customer: their own row, falling back to platform
    * defaults if the row is somehow absent.
    */
-  async getLimits(userId: string) {
+  async getLimits(userId: string): Promise<CustomerLimits> {
     const rows = await this.db
       .select()
       .from(customerLimits)
       .where(eq(customerLimits.userId, userId))
       .limit(1);
     const row = rows[0];
-    if (!row) {
-      const d = this.config.defaults;
-      return {
+    const d = this.config.defaults;
+    // Both branches return the full table row shape so callers never have to
+    // handle a partially-shaped fallback.
+    return (
+      row ?? {
         userId,
         requestsPerMinute: d.requestsPerMinute,
         requestsPerDay: d.requestsPerDay,
         tokensPerDay: d.tokensPerDay,
         maxConcurrentRequests: d.maxConcurrentRequests,
-        allowedModels: null as string | null,
-      };
-    }
-    return row;
+        allowedModels: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }
+    );
   }
 
   async updateLimits(

@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Database } from '@synzo/database';
 import { models, providers } from '@synzo/database';
 

@@ -40,6 +40,20 @@ function fail(issues: { message: string; path: (string | number)[] }[]): never {
   throw badRequest(first?.message ?? 'Invalid request', 'invalid_request', first?.path.join('.') || undefined);
 }
 
+/**
+ * allowed_models is stored as a JSON array string. A malformed value is
+ * treated as "no explicit allowlist" rather than locking the customer out.
+ */
+function parseAllowedModels(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 function rangeToDates(range: string, from?: string, to?: string): { from: Date; to: Date } {
   if (range === 'custom' && from && to) {
     return { from: new Date(from), to: new Date(to) };
@@ -288,6 +302,37 @@ export async function registerCustomerRoutes(app: FastifyInstance, deps: Custome
     ]);
 
     return { requests: rows, total, limit: q.limit, offset: q.offset };
+  });
+
+  /* ------------------------------------------------------------- models */
+
+  // Models the signed-in customer may actually call. Admins additionally get
+  // the full registry so they can enable or disable entries from the dashboard.
+  app.get('/api/models', async (request: FastifyRequest) => {
+    const user = requireSession(request);
+    const isAdmin = user.role === 'admin';
+
+    // A per-customer allowed_models list restricts what the key can call, so
+    // the dashboard must show the same set the API would accept.
+    // listAll and listEnabled select slightly different columns, so normalize
+    // to one shape here rather than making the UI handle both.
+    const all = (isAdmin ? await deps.models.listAll() : await deps.models.listEnabled()).map((m) => ({
+      id: m.id,
+      publicName: m.publicName,
+      provider: m.provider,
+      enabled: 'enabled' in m ? m.enabled : true,
+      createdAt: 'createdAt' in m ? m.createdAt : m.created,
+    }));
+
+    const raw = await deps.users.getLimits(user.userId);
+    const allowed = raw.allowedModels
+      ? all.filter((m) => parseAllowedModels(raw.allowedModels).includes(m.publicName))
+      : all;
+
+    return {
+      models: allowed,
+      providers: isAdmin ? await deps.models.listProviders() : [],
+    };
   });
 
   /* --------------------------------------------------------- overview */

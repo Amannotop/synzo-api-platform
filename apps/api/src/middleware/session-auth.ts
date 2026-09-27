@@ -68,11 +68,15 @@ export class SessionService {
   }
 }
 
-/** Reads and validates the session cookie, attaching the user when valid. */
-export function createSessionResolver(sessions: SessionRepository) {
+/**
+ * Reads and validates the session cookie, attaching the user when valid.
+ * The cookie name is taken from config rather than hard-coded, so a deployment
+ * that renames SESSION_COOKIE_NAME keeps resolving sessions.
+ */
+export function createSessionResolver(sessions: SessionRepository, cookieName: string) {
   return async function resolveSession(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
     const cookies = (request as FastifyRequest & { cookies?: Record<string, string | undefined> }).cookies;
-    const token = cookies?.synzo_session;
+    const token = cookies?.[cookieName];
     if (!token) return;
     const resolved = await sessions.resolve(sha256Hex(token));
     if (!resolved) return;

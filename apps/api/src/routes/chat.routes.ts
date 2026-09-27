@@ -1,15 +1,15 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import type { z } from 'zod';
 import { buildChatRequestSchema } from '@synzo/validation';
 import type { AppConfig } from '@synzo/config';
 import type { ChatService } from '../services/chat.service.js';
 import { createApiKeyAuth, type ApiKeyContext } from '../middleware/api-key-auth.js';
-import { badRequest, HttpError } from '../lib/errors.js';
+import type { HttpError } from '../lib/errors.js';
+import { badRequest } from '../lib/errors.js';
 import type { ApiKeyRepository } from '../repositories/api-key.repository.js';
 import type { UserRepository } from '../repositories/user.repository.js';
 import type { ModelRepository } from '../repositories/model.repository.js';
 import type { Logger } from '../lib/logger.js';
-import type { AIProvider } from '../providers/provider.interface.js';
 import type { NormalizedUsage } from '../providers/provider.interface.js';
 
 interface ChatDeps {
