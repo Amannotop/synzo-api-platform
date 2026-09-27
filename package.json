@@ -8,7 +8,7 @@
   },
   "packageManager": "pnpm@11.25.0",
   "scripts": {
-    "build": "pnpm --filter @synzo/api run build && pnpm --filter @synzo/dashboard run build",
+    "build": "pnpm run build:packages && pnpm --filter @synzo/api run build && pnpm --filter @synzo/dashboard run build",
     "dev": "pnpm --parallel --filter @synzo/api --filter @synzo/dashboard run dev",
     "dev:api": "pnpm --filter @synzo/api run dev",
     "dev:dashboard": "pnpm --filter @synzo/dashboard run dev",
@@ -23,7 +23,10 @@
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test"
+    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test",
+    "build:packages": "pnpm --filter @synzo/types run build && pnpm --filter @synzo/config run build && pnpm --filter @synzo/validation run build && pnpm --filter @synzo/database run build",
+    "check:start": "node scripts/check-start.mjs",
+    "verify:dist": "pnpm run build && pnpm run check:start"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

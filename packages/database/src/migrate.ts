@@ -11,6 +11,10 @@ import postgres from 'postgres';
 import { loadEnv } from '@synzo/config';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// This file runs from src/ under tsx and from dist/ under node, so the SQL
+// directory is one level up in both cases: <package>/migrations. Resolving
+// from the module location rather than the process CWD keeps `pnpm migrate`
+// working from anywhere.
 const MIGRATIONS_DIR = join(__dirname, '..', 'migrations');
 
 export interface MigrationResult {
