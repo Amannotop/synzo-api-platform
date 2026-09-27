@@ -21,7 +21,19 @@ export interface AccountTokenServiceDeps {
    * in development and test it returns the token so the flow is exercisable
    * without a mail server. It must never be logged.
    */
-  deliver: (args: { userId: string; email: string; purpose: AccountTokenPurpose; raw: string; expiresAt: Date }) => Promise<void>;
+  deliver: (args: {
+    userId: string;
+    email: string;
+    purpose: AccountTokenPurpose;
+    raw: string;
+    expiresAt: Date;
+    /**
+     * The public origin this request arrived on, resolved from the request
+     * unless the operator pinned one. Passed in rather than looked up from
+     * config so the link matches whichever domain the customer is using.
+     */
+    publicOrigin: string;
+  }) => Promise<void>;
 }
 
 /** Expiry windows: long enough to be usable, short enough to limit exposure. */
@@ -57,7 +69,7 @@ export class AccountTokenService {
   async issue(
     user: { id: string; email: string },
     purpose: AccountTokenPurpose,
-    meta: { ip: string | null; userAgent: string | null },
+    meta: { ip: string | null; userAgent: string | null; publicOrigin: string },
   ): Promise<IssuedToken> {
     // Any earlier outstanding token for this purpose is now superseded.
     await this.deps.db
@@ -83,7 +95,14 @@ export class AccountTokenService {
       userAgent: meta.userAgent,
     });
 
-    await this.deps.deliver({ userId: user.id, email: user.email, purpose, raw, expiresAt });
+    await this.deps.deliver({
+      userId: user.id,
+      email: user.email,
+      purpose,
+      raw,
+      expiresAt,
+      publicOrigin: meta.publicOrigin,
+    });
 
     this.deps.logger.info('Account token issued', {
       userId: user.id,

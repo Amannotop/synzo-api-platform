@@ -94,12 +94,14 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
     db,
     config,
     logger,
-    deliver: async ({ email, purpose, raw, expiresAt }) => {
+    deliver: async ({ email, purpose, raw, expiresAt, publicOrigin }) => {
       // Delivery failures must not surface as "we emailed you" when we did not,
       // and must not take the request down either: the row is already written
       // and the customer can retry.
       try {
-        await mailer.send(accountTokenMail(config, { to: email, purpose, raw, expiresAt }));
+        await mailer.send(
+          accountTokenMail(config, { to: email, purpose, raw, expiresAt, publicOrigin }),
+        );
       } catch (err) {
         logger.error('Failed to deliver account token email', {
           purpose,

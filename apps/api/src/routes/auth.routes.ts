@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { loginSchema, registerSchema } from '@synzo/validation';
 import type { AppConfig } from '@synzo/config';
+import { LOCAL_ORIGIN, originContext, resolvePublicOrigin } from '../lib/public-origin.js';
 import { conflict, badRequest, HttpError, notFound } from '../lib/errors.js';
 import { fakePasswordHash, hashPassword, verifyPassword } from '../lib/crypto.js';
 import { parseAllowedModels } from '../lib/allowed-models.js';
@@ -25,11 +26,21 @@ interface AuthDeps {
   accountTokens: AccountTokenService;
 }
 
+/** Request facts recorded against audit rows and sessions. */
 function meta(request: FastifyRequest) {
   return {
     ip: request.ip ?? null,
     userAgent: (request.headers['user-agent'] as string | undefined) ?? null,
   };
+}
+
+/**
+ * The origin the customer reached us on, so a reset or verification email
+ * contains a link back to the domain they are actually using rather than a
+ * hardcoded development address.
+ */
+function originFor(request: FastifyRequest, config: AppConfig): string {
+  return resolvePublicOrigin(request, originContext(config), LOCAL_ORIGIN).origin;
 }
 
 export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): Promise<void> {
@@ -81,7 +92,7 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
     await accountTokens.issue(
       { id: created.id, email },
       'email_verification',
-      meta(request),
+      { ...meta(request), publicOrigin: originFor(request, config) },
     );
 
     await audit.record({

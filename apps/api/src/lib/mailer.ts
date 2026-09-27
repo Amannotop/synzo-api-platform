@@ -63,14 +63,21 @@ export function createMailer(config: AppConfig): Mailer {
   };
 }
 
-/** Builds the customer-facing link that embeds a one-time token. */
+/**
+ * Builds the customer-facing link that embeds a one-time token.
+ *
+ * `publicOrigin` is the origin the customer actually reached us on, resolved
+ * from the request. It is a required argument rather than read from config so
+ * this function cannot silently fall back to a development default and mint a
+ * link that is dead for the recipient.
+ */
 export function accountTokenLink(
-  config: AppConfig,
+  publicOrigin: string,
   purpose: AccountTokenPurpose,
   raw: string,
 ): string {
   const path = purpose === 'password_reset' ? 'reset-password' : 'verify-email';
-  return `${config.publicBaseUrl}/${path}?token=${encodeURIComponent(raw)}`;
+  return `${publicOrigin.replace(/\/+$/, '')}/${path}?token=${encodeURIComponent(raw)}`;
 }
 
 const SUBJECTS: Record<AccountTokenPurpose, string> = {
@@ -106,9 +113,15 @@ function bodyFor(purpose: AccountTokenPurpose, link: string, minutesLeft: number
 
 export function accountTokenMail(
   config: AppConfig,
-  args: { to: string; purpose: AccountTokenPurpose; raw: string; expiresAt: Date },
+  args: {
+    to: string;
+    purpose: AccountTokenPurpose;
+    raw: string;
+    expiresAt: Date;
+    publicOrigin: string;
+  },
 ): OutboundMail {
-  const link = accountTokenLink(config, args.purpose, args.raw);
+  const link = accountTokenLink(args.publicOrigin, args.purpose, args.raw);
   const minutesLeft = Math.max(1, Math.round((args.expiresAt.getTime() - Date.now()) / 60_000));
   return {
     to: args.to,

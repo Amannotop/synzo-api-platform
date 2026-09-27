@@ -126,9 +126,17 @@ const envSchema = z.object({
   DASHBOARD_ORIGIN: z.string().default('http://localhost:5173'),
 
   // --- Account recovery / verification (§8) -------------------------------
-  // Public origin of the deployment. Used to build the links in reset and
-  // verification emails; it must be the address a customer can actually reach.
-  PUBLIC_BASE_URL: z.string().default('http://localhost:5173'),
+  /**
+   * Public origin of the deployment, used to build the links in reset and
+   * verification emails.
+   *
+   * Optional on purpose. When it is unset the origin is derived from the
+   * incoming request, so one deployment works on any domain without being
+   * reconfigured, and a staging copy on a different hostname still mints
+   * working links. Set it explicitly to pin the value; it then wins over
+   * detection, which is the escape hatch when a proxy's headers are wrong.
+   */
+  PUBLIC_BASE_URL: optionalSecret,
   /**
    * Where password-reset and verification emails go. 'log' is development and
    * test only and is rejected in production, because writing a live reset link
@@ -208,7 +216,11 @@ export interface AppConfig {
   admin: { email: string | undefined; password: string | undefined };
   cors: { allowList: string[]; allowCredentials: boolean };
   dashboardOrigin: string;
-  publicBaseUrl: string;
+  /**
+   * The operator-pinned public origin, or undefined when the origin should be
+   * detected per request.
+   */
+  publicBaseUrl: string | undefined;
   mail: { transport: 'smtp' | 'log'; from: string; smtpUrl: string | undefined };
   logging: { level: string; logRequestContent: boolean; logRequestContentMaxChars: number };
   providerHealth: { enabled: boolean; intervalMs: number };
@@ -322,7 +334,11 @@ export function buildConfig(env: Env): AppConfig {
     },
     cors: { allowList: origins, allowCredentials: true } satisfies CorsOrigins,
     dashboardOrigin: env.DASHBOARD_ORIGIN,
-    publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/+$/, ''),
+    /**
+     * Undefined means "derive the public origin from each request". See
+     * apps/api/src/lib/public-origin.ts for the rules and the trust boundary.
+     */
+    publicBaseUrl: env.PUBLIC_BASE_URL?.replace(/\/+$/, ''),
     mail: {
       transport: env.MAIL_TRANSPORT,
       from: env.MAIL_FROM,

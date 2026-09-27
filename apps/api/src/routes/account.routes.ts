@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '@synzo/config';
+import { LOCAL_ORIGIN, originContext, resolvePublicOrigin } from '../lib/public-origin.js';
 import type { Redis } from 'ioredis';
 import { HttpError, badRequest, notFound } from '../lib/errors.js';
 import { hashPassword } from '../lib/crypto.js';
@@ -20,11 +21,21 @@ interface AccountDeps {
   redis: Redis;
 }
 
+/** Request facts recorded against audit rows and sessions. */
 function meta(request: FastifyRequest) {
   return {
     ip: request.ip ?? null,
     userAgent: (request.headers['user-agent'] as string | undefined) ?? null,
   };
+}
+
+/**
+ * The origin the customer reached us on, so a reset or verification email
+ * contains a link back to the domain they are actually using rather than a
+ * hardcoded development address.
+ */
+function originFor(request: FastifyRequest, config: AppConfig): string {
+  return resolvePublicOrigin(request, originContext(config), LOCAL_ORIGIN).origin;
 }
 
 /**
@@ -76,7 +87,7 @@ export async function registerAccountRoutes(app: FastifyInstance, deps: AccountD
         await accountTokens.issue(
           { id: user.id, email: user.email },
           'password_reset',
-          meta(request),
+          { ...meta(request), publicOrigin: originFor(request, config) },
         );
         await audit.record({
           actorUserId: user.id,
@@ -197,7 +208,7 @@ export async function registerAccountRoutes(app: FastifyInstance, deps: AccountD
     await accountTokens.issue(
       { id: record.id, email: record.email },
       'email_verification',
-      meta(request),
+      { ...meta(request), publicOrigin: originFor(request, config) },
     );
     await redis.incr(key);
     await redis.expire(key, config.bruteForce.attemptWindowSeconds);
