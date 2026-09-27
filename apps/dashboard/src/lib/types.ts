@@ -47,7 +47,12 @@ export interface ApiKey {
 
 export interface Model {
   id: string;
+  /** What a customer sends as `model` in the API. */
   publicName: string;
+  /** Friendly name shown in the dashboard, e.g. "GPT-6 Astra". */
+  label: string;
+  /** One-line description of what the tier is for. */
+  description: string;
   provider: string;
   enabled: boolean;
   createdAt: string;

@@ -115,7 +115,7 @@ async function streamResponse(
   try {
     const iterator = resolved.provider.streamChat(
       {
-        model: resolved.modelName,
+        model: resolved.upstreamModel,
         messages: resolved.messages,
         stream: true,
         ...(resolved.maxTokens !== undefined ? { max_tokens: resolved.maxTokens } : {}),

@@ -33,8 +33,8 @@ export default function Models() {
         <div>
           <h1>Models</h1>
           <p>
-            Models available to your keys. Requests resolve a public model name to a provider
-            upstream, so customers never need to know which provider serves it.
+            You pick a tier and we send it to the model behind it, so the names in your code never
+            change when a model is upgraded. Use the tier as the <span className="mono">model</span> value in any request.
           </p>
         </div>
       </div>
@@ -55,13 +55,16 @@ export default function Models() {
                 <div className="row-between wrap">
                   <div>
                     <div className="row wrap mb-1">
-                      <span className="strong mono">{m.publicName}</span>
+                      <span className="strong">{m.label}</span>
+                      <span className={`badge ${m.enabled ? 'badge-accent' : 'badge-neutral'}`}>{m.publicName}</span>
                       <span className={`badge ${m.enabled ? 'badge-success' : 'badge-neutral'}`}>
                         <span className="dot" />{m.enabled ? 'enabled' : 'disabled'}
                       </span>
                     </div>
+                    {m.description && <div className="small muted mb-1">{m.description}</div>}
                     <div className="small muted">
-                      Provider <span className="mono">{m.provider}</span> · added {formatDate(m.createdAt)}
+                      Send <span className="mono">model: "{m.publicName}"</span> · provider{' '}
+                      <span className="mono">{m.provider}</span> · added {formatDate(m.createdAt)}
                     </div>
                   </div>
                   {isAdmin && (

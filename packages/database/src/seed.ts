@@ -6,8 +6,8 @@
  * no usage and no fake statistics, so a fresh production database shows zeros
  * exactly as specified.
  */
-import { eq } from 'drizzle-orm';
-import { buildConfig, loadEnv } from '@synzo/config';
+import { eq, sql } from 'drizzle-orm';
+import { buildConfig, loadEnv, MODEL_TIERS } from '@synzo/config';
 import { createDatabase } from './client.js';
 import { models, providers } from './schema.js';
 
@@ -30,22 +30,37 @@ async function seed(): Promise<void> {
     }
     if (!provider) throw new Error('Failed to resolve provider');
 
-    const existing = await db
-      .select()
-      .from(models)
-      .where(eq(models.publicName, config.defaultModel))
-      .limit(1);
+    // Seed the full tier catalogue, not just the default. Each row maps a
+    // public tier name to the upstream model that serves it, so the default is
+    // guaranteed to exist along with everything else. ON CONFLICT keeps the
+    // seed idempotent and refreshes an upstream id that has since been
+    // corrected, rather than leaving a stale mapping behind.
+    const inserted = await db
+      .insert(models)
+      .values(
+        MODEL_TIERS.map((t) => ({
+          publicName: t.tier,
+          providerId: provider.id,
+          upstreamModel: t.upstreamModel,
+          enabled: true,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: models.publicName,
+        set: {
+          upstreamModel: sql.raw('excluded.upstream_model'),
+          enabled: true,
+          updatedAt: new Date(),
+        },
+      })
+      .returning({ publicName: models.publicName });
 
-    if (existing.length > 0) {
-      console.log(`Model already present: ${config.defaultModel}`);
-    } else {
-      await db.insert(models).values({
-        publicName: config.defaultModel,
-        providerId: provider.id,
-        upstreamModel: config.defaultModel,
-        enabled: true,
-      });
-      console.log(`Created model: ${config.defaultModel}`);
+    for (const row of inserted) console.log(`Seeded model: ${row.publicName}`);
+
+    if (!inserted.some((m) => m.publicName === config.defaultModel)) {
+      throw new Error(
+        `DEFAULT_MODEL="${config.defaultModel}" is not one of the seeded tiers (${MODEL_TIERS.map((t) => t.tier).join(', ')}).`,
+      );
     }
   } finally {
     await close();

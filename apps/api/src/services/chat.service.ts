@@ -22,7 +22,18 @@ export interface ChatServiceDeps {
 
 export interface ResolvedChatRequest {
   requestId: string;
+  /**
+   * The public model name the customer asked for. This is what usage is
+   * recorded and reported against, so dashboards and invoices show the name
+   * the customer recognises.
+   */
   modelName: string;
+  /**
+   * The provider's identifier for that model. This, and NOT `modelName`, is
+   * what gets sent upstream. The two differ whenever a public name is an alias
+   * for a provider model, which is the normal case for tiered catalogues.
+   */
+  upstreamModel: string;
   modelId: string;
   provider: AIProvider;
   messages: ChatMessage[];
@@ -106,6 +117,7 @@ export class ChatService {
     return {
       requestId: generateRequestId(),
       modelName: model.publicName,
+      upstreamModel: model.upstreamModel,
       modelId: model.id,
       provider,
       messages: body.messages,
@@ -213,7 +225,7 @@ export class ChatService {
     try {
       const result = await resolved.provider.chat(
         {
-          model: resolved.modelName,
+          model: resolved.upstreamModel,
           messages: resolved.messages,
           stream: false,
           ...(resolved.maxTokens !== undefined ? { max_tokens: resolved.maxTokens } : {}),
@@ -237,7 +249,10 @@ export class ChatService {
       await this.deps.rateLimiter.recordTokens(this.limitInput(ctx), result.usage.totalTokens);
       await resolved.lease.release();
 
-      return { body: result.body, httpStatus: 200 };
+      // The upstream echoes the id it was asked for. Rewrite it to the public
+      // name so a client that sent `max` sees `max` come back, and the
+      // provider's internal model naming stays an implementation detail.
+      return { body: { ...result.body, model: resolved.modelName }, httpStatus: 200 };
     } catch (err) {
       const httpError = this.normalizeProviderError(err);
       record.status = signal.aborted ? 'cancelled' : 'error';

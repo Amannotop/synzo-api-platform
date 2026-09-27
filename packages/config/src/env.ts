@@ -69,7 +69,12 @@ const envSchema = z.object({
   UPSTREAM_STREAM_TIMEOUT: intFromEnv(1000, 1_800_000).default(300_000),
   UPSTREAM_MAX_RETRIES: intFromEnv(0, 5).default(1),
 
-  DEFAULT_MODEL: z.string().min(1).default('space-bunny-free'),
+  /**
+   * Default tier when a chat request omits `model`. `max` is the strongest
+   * tier the upstream offers, so an omitted model is the most capable one
+   * rather than a cheap fallback.
+   */
+  DEFAULT_MODEL: z.string().min(1).default('max'),
 
   // Default per-customer limits
   DEFAULT_REQUESTS_PER_MINUTE: intFromEnv(1, 100_000).default(60),
@@ -133,6 +138,37 @@ const envSchema = z.object({
   MAIL_FROM: z.string().default('Synzo <no-reply@synzo.local>'),
   SMTP_URL: optionalSecret,
 });
+
+/**
+ * The model catalogue exposed to customers.
+ *
+ * A customer picks a tier; the tier resolves to a concrete upstream model. The
+ * two are separate on purpose: the public name is the product surface and can
+ * be renamed or re-pointed without a code change, while the upstream id is
+ * whatever the provider currently calls that model.
+ *
+ * Order is meaningful — it is the order the tiers are shown in, from most to
+ * least capable.
+ */
+export interface ModelTier {
+  /** What a customer sends as `model`. */
+  tier: string;
+  /** The provider's identifier for the model serving this tier. */
+  upstreamModel: string;
+  /** Display name for the dashboard. */
+  label: string;
+  /** One-line description of what this tier is for. */
+  description: string;
+}
+
+export const MODEL_TIERS: readonly ModelTier[] = [
+  { tier: 'max', upstreamModel: 'gpt-6-astra', label: 'GPT-6 Astra', description: 'Maximum capability. Hardest reasoning and the most thorough answers.' },
+  { tier: 'xhigh', upstreamModel: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'Extra high. Near-maximum capability at lower cost and latency.' },
+  { tier: 'high', upstreamModel: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'High. Strong general capability for complex work.' },
+  { tier: 'medium', upstreamModel: 'claude-opus-4-8', label: 'Claude Opus 4.8', description: 'Medium. Balanced quality and speed for everyday tasks.' },
+  { tier: 'low', upstreamModel: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', description: 'Low. Fastest and cheapest. Best for simple, high-volume work.' },
+] as const;
+
 
 export type Env = z.infer<typeof envSchema>;
 export interface AppConfig {

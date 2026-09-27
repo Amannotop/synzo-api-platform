@@ -9,6 +9,14 @@ function useBaseUrl(): string {
   return base;
 }
 
+const TIERS = [
+  { tier: 'max', label: 'GPT-6 Astra', description: 'Maximum capability. Hardest reasoning and the most thorough answers.' },
+  { tier: 'xhigh', label: 'GPT-5.6 Sol', description: 'Extra high. Near-maximum capability at lower cost and latency.' },
+  { tier: 'high', label: 'GPT-5.6 Terra', description: 'High. Strong general capability for complex work.' },
+  { tier: 'medium', label: 'Claude Opus 4.8', description: 'Medium. Balanced quality and speed for everyday tasks.' },
+  { tier: 'low', label: 'Claude Sonnet 4.6', description: 'Low. Fastest and cheapest. Best for simple, high-volume work.' },
+];
+
 const LANG_TABS = [
   { id: 'curl', label: 'cURL' },
   { id: 'javascript', label: 'JavaScript' },
@@ -52,16 +60,38 @@ export default function Documentation() {
   -H "Authorization: Bearer sk_test_YOUR_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "space-bunny-free",
+    "model": "max",
     "messages": [{ "role": "user", "content": "say hi" }]
   }'`}</code></pre>
+
+            <h3>Models</h3>
+            <p>
+              Pick a tier by name. The platform resolves it to the underlying model for you, so
+              the name you send is the whole model surface.
+            </p>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Tier</th><th>Model</th><th>Use it for</th></tr>
+                </thead>
+                <tbody>
+                  {TIERS.map((t) => (
+                    <tr key={t.tier}>
+                      <td><span className="mono strong">{t.tier}</span></td>
+                      <td>{t.label}</td>
+                      <td className="small">{t.description}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
             <h3>Response</h3>
             <pre><code>{`{
   "id": "chatcmpl-...",
   "object": "chat.completion",
   "created": 1758000000,
-  "model": "space-bunny-free",
+  "model": "max",
   "choices": [{
     "index": 0,
     "message": { "role": "assistant", "content": "Hi! 👋" },
@@ -93,7 +123,7 @@ export default function Documentation() {
   -H "Authorization: Bearer sk_test_YOUR_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "space-bunny-free",
+    "model": "max",
     "stream": true,
     "messages": [{ "role": "user", "content": "Count 1 to 5, digits only." }]
   }'`}</code></pre>
@@ -107,7 +137,7 @@ export default function Documentation() {
     "Content-Type": "application/json"
   },
   body: JSON.stringify({
-    model: "space-bunny-free",
+    model: "max",
     messages: [{ role: "user", content: "Hello" }]
   })
 });
@@ -125,7 +155,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="space-bunny-free",
+    model="max",
     messages=[{"role": "user", "content": "Hello"}]
 )
 print(response.choices[0].message.content)`}</code></pre>

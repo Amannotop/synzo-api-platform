@@ -8,6 +8,10 @@ set -uo pipefail
 
 BASE="${1:-http://127.0.0.1:3000}"
 
+# The model the suite exercises. Overridable so the same script can be pointed
+# at a deployment serving a different catalogue.
+SMOKE_MODEL="${SMOKE_MODEL:-${DEFAULT_MODEL:-max}}"
+
 # Resolve the workspace from the script's own location, never the caller's CWD.
 # `psql` and the key-hash helper below both read .env, and reading it relative
 # to wherever the user happened to be standing made the script fail in a way
@@ -38,6 +42,16 @@ trap release_server EXIT
 ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
 step() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
+
+# Builds a chat-completions JSON body.
+#
+# These payloads were single-quoted shell strings holding the model name.
+# Single quotes suppress expansion, so the model has to be interpolated with
+# printf's %s instead of being pasted in as a literal.
+chat_body() {
+  printf '{"model":"%s","messages":[{"role":"user","content":"%s"}]%s}' \
+    "$SMOKE_MODEL" "${1:-say hi}" "${2:-}"
+}
 
 # check <name> <expected_status> <actual_status> [detail]
 check() {
@@ -233,13 +247,17 @@ check "models without key is 401" 401 "$(status)" "$BODY"
 OUT=$(curl -sS -w $'\n%{http_code}' "$BASE/v1/models" -H "Authorization: Bearer $API_KEY")
 ST="${OUT##*$'\n'}"; BODY="${OUT%$'\n'*}"
 check "models with key" 200 "$ST" "$BODY"
-MODEL_ID=$(printf '%s' "$BODY" | jget data.0.id)
-[ "$MODEL_ID" = "space-bunny-free" ] && ok "model listed: $MODEL_ID" || bad "unexpected model: $MODEL_ID"
+# The listing is ordered by public name, so data.0 is alphabetical rather than
+# the tier the suite exercises. Assert the model is PRESENT instead of first.
+case "$BODY" in
+  *"\"id\":\"$SMOKE_MODEL\""*) ok "model listed: $SMOKE_MODEL" ;;
+  *) bad "model not in /v1/models: $SMOKE_MODEL" ;;
+esac
 
 step "10. Real upstream chat completion (non-streaming)"
 OUT=$(curl -sS -w $'\n%{http_code}' -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"space-bunny-free","messages":[{"role":"user","content":"say hi"}]}')
+  -d "$(chat_body)")
 ST="${OUT##*$'\n'}"; BODY="${OUT%$'\n'*}"
 check "chat completion" 200 "$ST" "$BODY"
 CONTENT=$(printf '%s' "$BODY" | jget choices.0.message.content)
@@ -251,7 +269,7 @@ TOTAL=$(printf '%s' "$BODY" | jget usage.total_tokens)
 step "11. Streaming (real upstream, ends with [DONE])"
 OUT=$(curl -sS -N -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"space-bunny-free","stream":true,"messages":[{"role":"user","content":"Count 1 to 5, digits only."}]}')
+  -d "$(chat_body 'Count 1 to 5, digits only.' ',"stream":true')")
 FRAME_COUNT=$(printf '%s' "$OUT" | grep -c '^data: ')
 LAST=$(printf '%s' "$OUT" | grep '^data: ' | tail -1)
 printf '  info frames: %s, last: %s\n' "$FRAME_COUNT" "$LAST"
@@ -293,23 +311,27 @@ check "invalid model" 404 "$ST" "$BODY"
 case "$BODY" in *invalid_model*) ok "normalized to invalid_model";; *) bad "wrong error code: $BODY";; esac
 OUT=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"space-bunny-free","messages":')
+  -d "$(printf '{"model":"%s","messages":' "$SMOKE_MODEL")")
 check "malformed JSON" 400 "$OUT" "$OUT"
 OUT=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"space-bunny-free","messages":[{"role":"admin","content":"x"}]}')
+  -d "$(printf '{"model":"%s","messages":[{"role":"admin","content":"x"}]}' "$SMOKE_MODEL")")
 check "invalid role rejected" 400 "$OUT" "$OUT"
 OUT=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"space-bunny-free","messages":[]}')
+  -d "$(printf '{"model":"%s","messages":[]}' "$SMOKE_MODEL")")
 check "empty messages rejected" 400 "$OUT" "$OUT"
-python3 -c "import json;print(json.dumps({'model':'space-bunny-free','messages':[{'role':'user','content':'x'*2000000}]}))" > "$WORK/big.json"
+python3 -c "import json,sys;print(json.dumps({'model':sys.argv[1],'messages':[{'role':'user','content':'x'*2000000}]}))" "$SMOKE_MODEL" > "$WORK/big.json"
 OUT=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' --data-binary "@$WORK/big.json")
 check "oversized body" 413 "$OUT" "$OUT"
+# Built with python so the quote in the payload cannot break out of the JSON
+# string: a hand-quoted shell payload sends malformed JSON and gets a 400 for
+# the wrong reason, which would hide a real injection regression.
+python3 -c "import json,sys;print(json.dumps({'model':sys.argv[1],'messages':[{'role':'user','content':'hi'}]}))" \
+  "$SMOKE_MODEL' OR 1=1--" > "$WORK/inject.json"
 OUT=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
-  -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
-  -d "{\"model\":\"space-bunny-free' OR 1=1--\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+  -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' --data-binary "@$WORK/inject.json")
 check "SQL injection in model" 404 "$OUT" "$OUT"
 
 step "15. Tenant isolation (second customer cannot see first)"
@@ -346,7 +368,7 @@ OUT=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/v1/models" -H "Authorizatio
 check "revoked key rejected" 401 "$OUT" "$OUT"
 OUT=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"space-bunny-free","messages":[{"role":"user","content":"hi"}]}')
+  -d "$(chat_body 'hi')")
 check "revoked key rejected on chat" 401 "$OUT" "$OUT"
 
 step "17. Expired API key is rejected"
@@ -393,7 +415,7 @@ fi
 for i in 1 2; do
   ( curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
       -H "Authorization: Bearer $CONC_KEY" -H 'Content-Type: application/json' \
-      -d '{"model":"space-bunny-free","messages":[{"role":"user","content":"say hi"}]}' \
+      -d "$(chat_body)" \
       > "$WORK/conc.$i" ) &
 done
 wait
@@ -462,7 +484,7 @@ step "18c. Stream ends cleanly even when the client stops reading"
 set -o pipefail
 OUT=$(curl -sS -N --max-time 30 -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $CONC_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"space-bunny-free","stream":true,"messages":[{"role":"user","content":"Count 1 to 20."}]}' \
+  -d "$(chat_body 'Count 1 to 20.' ',"stream":true')" \
   2>/dev/null | head -c 2000)
 RC=$?
 set +o pipefail

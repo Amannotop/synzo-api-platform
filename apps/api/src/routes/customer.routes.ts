@@ -8,6 +8,7 @@ import {
   usageQuerySchema,
 } from '@synzo/validation';
 import type { AppConfig } from '@synzo/config';
+import { MODEL_TIERS } from '@synzo/config';
 import { badRequest, conflict, notFoundOrForbidden, HttpError } from '../lib/errors.js';
 import { deriveKeyPrefix, generateApiKeySecret, hashApiKey } from '../lib/crypto.js';
 import { requireSession } from '../middleware/session-auth.js';
@@ -307,13 +308,35 @@ export async function registerCustomerRoutes(app: FastifyInstance, deps: Custome
     // the dashboard must show the same set the API would accept.
     // listAll and listEnabled select slightly different columns, so normalize
     // to one shape here rather than making the UI handle both.
-    const all = (isAdmin ? await deps.models.listAll() : await deps.models.listEnabled()).map((m) => ({
-      id: m.id,
-      publicName: m.publicName,
-      provider: m.provider,
-      enabled: 'enabled' in m ? m.enabled : true,
-      createdAt: 'createdAt' in m ? m.createdAt : m.created,
-    }));
+    // The catalogue is the product surface, so the dashboard is told what each
+    // tier is called and what it is for. Rows that exist in the database but not
+    // in the catalogue (an admin's own custom entry) keep working and simply show
+    // their public name as the label, rather than disappearing.
+    const all = (isAdmin ? await deps.models.listAll() : await deps.models.listEnabled()).map((m) => {
+      const tier = MODEL_TIERS.find((t) => t.tier === m.publicName);
+      return {
+        id: m.id,
+        publicName: m.publicName,
+        label: tier?.label ?? m.publicName,
+        description: tier?.description ?? '',
+        provider: m.provider,
+        enabled: 'enabled' in m ? m.enabled : true,
+        createdAt: 'createdAt' in m ? m.createdAt : m.created,
+      };
+    });
+
+    // Catalogue order is capability order (most capable first), which is the
+    // order a customer choosing a tier wants to read. Anything not in the
+    // catalogue sorts after it, alphabetically, so custom entries stay stable.
+    const rank = new Map(MODEL_TIERS.map((t, i) => [t.tier, i]));
+    all.sort((a, b) => {
+      const ra = rank.get(a.publicName);
+      const rb = rank.get(b.publicName);
+      if (ra !== undefined && rb !== undefined) return ra - rb;
+      if (ra !== undefined) return -1;
+      if (rb !== undefined) return 1;
+      return a.publicName.localeCompare(b.publicName);
+    });
 
     const raw = await deps.users.getLimits(user.userId);
     const allowed = filterByAllowedModels(all, parseAllowedModels(raw.allowedModels), (m) => m.publicName);
