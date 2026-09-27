@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { Redis } from 'ioredis';
+import type { Redis } from 'ioredis';
 import { RateLimitService, type RateLimitInput } from '../../apps/api/src/services/rate-limit.service.js';
 import { createHarness, clearRateLimitState } from '../helpers/harness.js';
 
@@ -11,7 +11,6 @@ import { createHarness, clearRateLimitState } from '../helpers/harness.js';
  * catch (§21, §22, §50).
  */
 let redis: Redis;
-let svc: RateLimitService;
 let harness: Awaited<ReturnType<typeof createHarness>>;
 
 const USER = 'user-rl-0001';
@@ -48,7 +47,6 @@ function makeLogger() {
 beforeAll(async () => {
   harness = await createHarness();
   redis = harness.redis;
-  svc = new RateLimitService(redis, makeLogger() as never);
 });
 
 afterAll(async () => {

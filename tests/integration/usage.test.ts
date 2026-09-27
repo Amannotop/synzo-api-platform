@@ -295,4 +295,40 @@ describe('model allowlist (spec 50)', () => {
 
     expect((await call(c.secret, { model })).statusCode).toBe(200);
   });
+
+  /**
+   * null and [] are different instructions, and every surface has to agree on
+   * which is which. They previously did not: an admin who ticked "only selected
+   * models" and unchecked everything got an allowlist of [], which the model
+   * endpoints read as "all models" while chat resolution read it as "none".
+   */
+  it('an empty allowlist means NO models, consistently', async () => {
+    const c = await customer();
+    const before = c.client.json<{ models: { publicName: string }[] }>(await c.client.get('/api/models'));
+    expect(before.models.length).toBeGreaterThan(0);
+    const model = before.models[0].publicName;
+
+    await harness.sql`update customer_limits set allowed_models = ${JSON.stringify([])} where user_id = ${c.userId}`;
+
+    // The dashboard and the OpenAI-compatible listing both show nothing.
+    const dashboard = c.client.json<{ models: unknown[] }>(await c.client.get('/api/models'));
+    expect(dashboard.models).toEqual([]);
+    const v1 = c.client.json<{ data: unknown[] }>(
+      await c.client.get('/v1/models', { authorization: `Bearer ${c.secret}` }),
+    );
+    expect(v1.data).toEqual([]);
+
+    // And the request itself is refused with the same 404 as any other
+    // disallowed model, so a locked-out customer cannot tell why.
+    expect((await call(c.secret, { model })).statusCode).toBe(404);
+  });
+
+  it('a null allowlist means EVERY enabled model', async () => {
+    const c = await customer();
+    await harness.sql`update customer_limits set allowed_models = NULL where user_id = ${c.userId}`;
+
+    const listed = c.client.json<{ models: { publicName: string }[] }>(await c.client.get('/api/models'));
+    expect(listed.models.length).toBeGreaterThan(0);
+    expect((await call(c.secret, { model: listed.models[0].publicName })).statusCode).toBe(200);
+  });
 });

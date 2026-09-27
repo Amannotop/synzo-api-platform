@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '@synzo/config';
 import type { ChatMessage } from '@synzo/types';
 import { HttpError, notFound, upstreamTimeout } from '../lib/errors.js';
+import { parseAllowedModels } from '../lib/allowed-models.js';
 import type { Logger } from '../lib/logger.js';
 import type { AIProvider, NormalizedUsage } from '../providers/provider.interface.js';
 import type { ProviderRegistry } from '../providers/provider.registry.js';
@@ -62,18 +63,9 @@ export class ChatService {
       throw notFound(`Model "${modelName}" is not currently available`, 'invalid_model');
     }
 
-    const allow = ctx.limits.allowedModels;
-    if (allow) {
-      let allowed: string[];
-      try {
-        const parsed: unknown = JSON.parse(allow);
-        allowed = Array.isArray(parsed) ? parsed.map(String) : [];
-      } catch {
-        allowed = [];
-      }
-      if (!allowed.includes(modelName)) {
-        throw notFound(`Model "${modelName}" is not available on your plan`, 'invalid_model');
-      }
+    const allow = parseAllowedModels(ctx.limits.allowedModels);
+    if (allow !== null && !allow.includes(modelName)) {
+      throw notFound(`Model "${modelName}" is not available on your plan`, 'invalid_model');
     }
     return model;
   }

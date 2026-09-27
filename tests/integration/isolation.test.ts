@@ -49,6 +49,8 @@ describe('project isolation', () => {
   it('lists only the calling customer projects', async () => {
     const a = await customer('iso-e');
     const b = await customer('iso-f');
+    const aList = a.client.json<{ projects: { id: string }[] }>(await a.client.get('/api/projects'));
+    expect(aList.projects.map((p) => p.id)).toEqual([a.projectId]);
     const list = b.client.json<{ projects: { id: string }[] }>(await b.client.get('/api/projects'));
     expect(list.projects.map((p) => p.id)).toEqual([b.projectId]);
   });

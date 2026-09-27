@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import type { Logger } from '../lib/logger.js';
-import { HttpError, quotaExceeded, rateLimited } from '../lib/errors.js';
+import type { HttpError} from '../lib/errors.js';
+import { quotaExceeded, rateLimited } from '../lib/errors.js';
 
 export interface RateLimitInput {
   userId: string;

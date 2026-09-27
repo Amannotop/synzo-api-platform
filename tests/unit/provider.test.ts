@@ -43,17 +43,6 @@ afterEach(() => {
   up.respondWith((_req, res) => json(res, 200, completionBody()));
 });
 
-async function collect(gen: AsyncGenerator<string, unknown, void>): Promise<{ frames: string[]; last: unknown }> {
-  const frames: string[] = [];
-  let last: unknown = null;
-  for await (const chunk of gen) {
-    frames.push(chunk);
-    last = await gen.return(undefined as never).catch(() => last);
-    break;
-  }
-  return { frames, last };
-}
-
 describe('upstream request mapping (spec 12, 17)', () => {
   it('forwards exactly model, messages, stream and max_tokens', async () => {
     const provider = new OpenCodeProvider(makeConfig());

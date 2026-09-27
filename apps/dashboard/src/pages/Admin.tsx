@@ -485,7 +485,9 @@ function CustomerDialog({ customer, isSelf, busy, onClose, onSave, onToggleStatu
               <p className="small subtle mt-1">
                 {draftForCustomer.allowedModels === null
                   ? 'This customer can use every enabled model.'
-                  : `This customer can use ${draftForCustomer.allowedModels.length} of ${allModels.length} models.`}
+                  : draftForCustomer.allowedModels.length === 0
+                    ? 'No models are selected. This customer cannot call any model until one is selected.'
+                    : `This customer can use ${draftForCustomer.allowedModels.length} of ${allModels.length} models.`}
               </p>
             </>
           )}
@@ -504,7 +506,22 @@ function CustomerDialog({ customer, isSelf, busy, onClose, onSave, onToggleStatu
               )}
               <Button variant="primary" size="sm" loading={saveLimits.isPending}
                 disabled={customer.unlimitedMode || !dirty}
-                onClick={() => saveLimits.mutate({ id: customer.id, limits: draftForCustomer })}>
+                onClick={() => {
+                  // An empty allowlist locks the customer out of every model.
+                  // That is a real, reversible-but-breaking change, so it gets
+                  // an explicit confirmation instead of saving on one click.
+                  const emptyAllowlist =
+                    draftForCustomer.allowedModels !== null && draftForCustomer.allowedModels.length === 0;
+                  if (
+                    emptyAllowlist &&
+                    !window.confirm(
+                      'This customer will have access to NO models and every request will fail. Continue?',
+                    )
+                  ) {
+                    return;
+                  }
+                  saveLimits.mutate({ id: customer.id, limits: draftForCustomer });
+                }}>
                 Save limits
               </Button>
             </span>

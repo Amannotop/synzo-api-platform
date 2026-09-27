@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '@synzo/config';
 import { createApiKeyAuth } from '../middleware/api-key-auth.js';
+import { filterByAllowedModels, parseAllowedModels } from '../lib/allowed-models.js';
 import type { ApiKeyRepository } from '../repositories/api-key.repository.js';
 import type { UserRepository } from '../repositories/user.repository.js';
 import type { ModelRepository } from '../repositories/model.repository.js';
@@ -81,17 +82,11 @@ export async function registerSystemRoutes(app: FastifyInstance, deps: SystemDep
   app.get('/v1/models', { preHandler: auth }, async (request) => {
     const ctx = request.apiKey;
     const all = await models.listEnabled();
-    let allowed = all;
-    if (ctx?.limits.allowedModels) {
-      let list: string[] = [];
-      try {
-        const parsed: unknown = JSON.parse(ctx.limits.allowedModels);
-        list = Array.isArray(parsed) ? parsed.map(String) : [];
-      } catch {
-        list = [];
-      }
-      allowed = all.filter((m) => list.includes(m.publicName));
-    }
+    const allowed = filterByAllowedModels(
+      all,
+      parseAllowedModels(ctx?.limits.allowedModels),
+      (m) => m.publicName,
+    );
     return {
       object: 'list',
       data: allowed.map((m) => ({

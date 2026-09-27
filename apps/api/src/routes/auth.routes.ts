@@ -4,6 +4,7 @@ import { loginSchema, registerSchema } from '@synzo/validation';
 import type { AppConfig } from '@synzo/config';
 import { conflict, badRequest, HttpError, notFound } from '../lib/errors.js';
 import { fakePasswordHash, hashPassword, verifyPassword } from '../lib/crypto.js';
+import { parseAllowedModels } from '../lib/allowed-models.js';
 import type { SessionService } from '../middleware/session-auth.js';
 import { requireSession } from '../middleware/session-auth.js';
 import type { UserRepository } from '../repositories/user.repository.js';
@@ -20,22 +21,6 @@ interface AuthDeps {
   audit: AuditRepository;
   redis: Redis;
   rateLimiter: RateLimitService;
-}
-
-/**
- * allowed_models is stored as a JSON array string. A malformed or empty value
- * means "every enabled model" rather than locking the customer out of all of
- * them.
- */
-function parseAllowedModels(raw: string | null | undefined): string[] | null {
-  if (!raw) return null;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    return parsed.map(String);
-  } catch {
-    return null;
-  }
 }
 
 function meta(request: FastifyRequest) {

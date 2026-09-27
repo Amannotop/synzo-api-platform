@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { adminUpdateLimitsSchema, adminUpdateUserSchema } from '@synzo/validation';
 import { badRequest, conflict, notFoundOrForbidden } from '../lib/errors.js';
 import { requireAdmin } from '../middleware/session-auth.js';
+import { parseAllowedModels } from '../lib/allowed-models.js';
 import type { UserRepository } from '../repositories/user.repository.js';
 import type { ModelRepository } from '../repositories/model.repository.js';
 import type { RequestRepository } from '../repositories/request.repository.js';
@@ -34,22 +35,13 @@ function presentLimits(limits: {
   maxConcurrentRequests: number;
   allowedModels: string | null;
 }) {
-  let allowedModels: string[] | null = null;
-  if (limits.allowedModels) {
-    try {
-      const parsed: unknown = JSON.parse(limits.allowedModels);
-      allowedModels = Array.isArray(parsed) ? parsed.map(String) : null;
-    } catch {
-      allowedModels = null;
-    }
-  }
   return {
     userId: limits.userId,
     requestsPerMinute: limits.requestsPerMinute,
     requestsPerDay: limits.requestsPerDay,
     tokensPerDay: limits.tokensPerDay,
     maxConcurrentRequests: limits.maxConcurrentRequests,
-    allowedModels,
+    allowedModels: parseAllowedModels(limits.allowedModels),
   };
 }
 

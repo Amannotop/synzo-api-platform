@@ -7,6 +7,15 @@
 set -uo pipefail
 
 BASE="${1:-http://127.0.0.1:3000}"
+
+# Resolve the workspace from the script's own location, never the caller's CWD.
+# `psql` and the key-hash helper below both read .env, and reading it relative
+# to wherever the user happened to be standing made the script fail in a way
+# that looked like a missing database rather than a missing file.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="$ROOT_DIR/.env"
+
 WORK="$(mktemp -d)"
 JAR="$WORK/cookies.txt"
 PASS=0
@@ -40,6 +49,19 @@ req() {
 status() { cat "$STATUS_FILE"; }
 body()   { cat "$BODY_FILE"; }
 
+# env_value <NAME> - read one value from the workspace .env, honouring quotes.
+env_value() {
+  [ -f "$ENV_FILE" ] || return 0
+  python3 -c "
+import re,sys,pathlib
+name=sys.argv[1]
+m=re.search(rf'^{name}=(.*)$', pathlib.Path(sys.argv[2]).read_text(), re.M)
+if not m: sys.exit(0)
+v=m.group(1).strip()
+if len(v)>=2 and v[0]==v[-1] and v[0] in '\'\"': v=v[1:-1]
+print(v)" "$1" "$ENV_FILE" 2>/dev/null
+}
+
 jget() { python3 -c "import sys,json;d=json.load(sys.stdin);
 import functools
 def dig(o,p):
@@ -49,6 +71,71 @@ def dig(o,p):
     if o is None: return ''
   return o
 print(dig(d,'$1') if dig(d,'$1') is not None else '')" 2>/dev/null; }
+
+# Restart the API against the real upstream before the live checks.
+#
+# A stale process is the most common cause of a confusing smoke failure: the
+# suite would otherwise test whatever code and configuration happened to be
+# listening, not the build in this workspace. The health poll below is what
+# makes the restart verifiable rather than a hopeful sleep.
+if [ "${SMOKE_NO_RESTART:-0}" != "1" ]; then
+  step "0. Restart the API"
+  if [ -f "$ROOT_DIR/package.json" ] && command -v pnpm >/dev/null 2>&1; then
+    # Read .env into the environment for the child process, without `source`ing
+    # it into this shell: a .env is data, not a script, and sourcing it would
+    # execute anything that happens to be on those lines.
+    while IFS= read -r _line; do
+      case "$_line" in ''|'#'*|*'='*) ;; *) continue ;; esac
+      _key="${_line%%=*}"; _val="${_line#*=}"
+      _key="$(printf '%s' "$_key" | tr -d '[:space:]')"
+      case "$_key" in ''|[!A-Za-z_]*) continue ;; esac
+      # Strip one layer of matching quotes and trailing whitespace.
+      _val="${_val%"${_val##*[![:space:]]}"}"
+      case "$_val" in \"*\") _val="${_val#\"}"; _val="${_val%\"}" ;; \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;; esac
+      export "$_key=$_val"
+    done < "$ENV_FILE"
+
+    # `start` runs dist/server.js, so the build has to be current or the smoke
+    # would test stale code. Rebuilding is cheap next to a failed run.
+    if [ "${SMOKE_NO_BUILD:-0}" != "1" ]; then
+      if pnpm --filter @synzo/api run build > "$WORK/build.log" 2>&1; then
+        ok "API build is current"
+      else
+        bad "API build failed"; sed -n '1,20p' "$WORK/build.log"
+      fi
+    fi
+
+    # Only touch a port this workspace owns, so a smoke run against a shared
+    # or remote instance never kills someone else's process.
+    SMOKE_PORT="${BASE##*:}"; SMOKE_PORT="${SMOKE_PORT%%/*}"
+    SMOKE_HOST="${BASE#*://}"; SMOKE_HOST="${SMOKE_HOST%%:*}"
+    if [ "$SMOKE_HOST" = "127.0.0.1" ] || [ "$SMOKE_HOST" = "localhost" ]; then
+      EXISTING=$(lsof -ti "tcp:$SMOKE_PORT" 2>/dev/null || true)
+      [ -n "$EXISTING" ] && kill $EXISTING 2>/dev/null && ok "stopped existing process on $SMOKE_PORT"
+      ( cd "$ROOT_DIR" && nohup pnpm --filter @synzo/api run start > "$WORK/api.log" 2>&1 & echo $! > "$WORK/api.pid" )
+      # /health is the liveness probe; it deliberately touches no dependency,
+      # so a poll succeeding means the process is actually serving requests.
+      HEALTHY=0
+      for _ in $(seq 1 60); do
+        if curl -sSf -o /dev/null "$BASE/health" 2>/dev/null; then HEALTHY=1; break; fi
+        sleep 1
+      done
+      if [ "$HEALTHY" = "1" ]; then
+        ok "API is healthy on $BASE"
+      else
+        bad "API did not become healthy at $BASE/health"
+        sed -n '1,20p' "$WORK/api.log" | sed 's/^/    | /'
+        printf '  \033[31mFAIL\033[0m stopping: log kept at %s\n' "$WORK/api.log"
+        printf '\n\033[1m================ %d passed, %d failed ================\033[0m\n' "$PASS" "$((FAIL+1))"
+        exit 1
+      fi
+    else
+      ok "not restarting: $BASE is not local"
+    fi
+  else
+    printf '  \033[33mSKIP\033[0m restart (pnpm unavailable)\n'
+  fi
+fi
 
 EMAIL="smoke+$(date +%s)@synzo.dev"
 # Generated per run so no realistic password is stored in the repository.
@@ -252,11 +339,11 @@ req POST "$BASE/api/keys" \
 EXPIRED_KEY=$(printf '%s' "$(body)" | jget secret)
 # Force expiry directly in the database: a 1-day key cannot be waited out in a
 # test, and this asserts the auth middleware honours the stored expires_at.
-PSQL_URL=$(python3 -c "import re,pathlib;print(re.search(r'^DATABASE_URL=(.*)$',pathlib.Path('.env').read_text(),re.M).group(1).strip())" 2>/dev/null)
+PSQL_URL=$(env_value DATABASE_URL)
 if [ -n "$PSQL_URL" ] && command -v psql >/dev/null 2>&1 && [ -n "$EXPIRED_KEY" ]; then
-  HASH=$(printf '%s' "$EXPIRED_KEY" | python3 -c "import sys,hmac,hashlib,re,pathlib
-pepper=re.search(r'^API_KEY_PEPPER=(.*)$',pathlib.Path('.env').read_text(),re.M).group(1).strip()
-print(hmac.new(pepper.encode(),sys.stdin.read().strip().encode(),hashlib.sha256).hexdigest())")
+  HASH=$(printf '%s' "$EXPIRED_KEY" | python3 -c "import sys,hmac,hashlib
+pepper=sys.argv[1]
+print(hmac.new(pepper.encode(),sys.stdin.read().strip().encode(),hashlib.sha256).hexdigest())" "$(env_value API_KEY_PEPPER)")
   psql "$PSQL_URL" -q -c \
     "UPDATE api_keys SET expires_at = now() - interval '1 day' WHERE key_hash = '$HASH'" >/dev/null 2>&1
   OUT=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/v1/models" -H "Authorization: Bearer $EXPIRED_KEY")
@@ -265,35 +352,104 @@ else
   printf '  \033[33mSKIP\033[0m expired key (no DATABASE_URL/psql available)\n'
 fi
 
-step "18. Concurrency limit is enforced"
-# A fresh key isolates this counter from the earlier requests.
+step "18. Concurrency limit is enforced (deterministic: limit set to 1)"
+# Firing N requests and hoping at least one 429s is timing-dependent: if the
+# upstream answers faster than the requests are dispatched, every one of them
+# is legitimately within the limit and the test fails for the wrong reason.
+# Instead the limit is pinned to 1 for the duration of the check, so the second
+# request is guaranteed to be shed, and the original value is restored after.
 req POST "$BASE/api/keys" \
   "{\"name\":\"Concurrency\",\"projectId\":\"$PROJECT_ID\",\"environment\":\"test\"}"
 CONC_KEY=$(printf '%s' "$(body)" | jget secret)
-# Fire several chat requests at once; at least one must be shed with 429 when
-# max_concurrent_requests is exceeded.
-# Read the real limit from the database so the test adapts to any deployment
-# rather than assuming a default, then send comfortably more than that.
-CONC_LIMIT=$(psql "$PSQL_URL" -tAq -c \
-  "SELECT max_concurrent_requests FROM customer_limits WHERE user_id = '$USER_ID'" 2>/dev/null | tr -d ' ')
-[ -z "$CONC_LIMIT" ] && CONC_LIMIT=10
-CONC_N=$(( CONC_LIMIT + 4 ))
-printf '  info max_concurrent_requests=%s, sending %s concurrent requests\n' "$CONC_LIMIT" "$CONC_N"
-CONC_CODES=""
-for i in $(seq 1 "$CONC_N"); do
+
+ORIG_CONC=""
+if [ -n "$PSQL_URL" ] && command -v psql >/dev/null 2>&1; then
+  ORIG_CONC=$(psql "$PSQL_URL" -tAq -c \
+    "SELECT max_concurrent_requests FROM customer_limits WHERE user_id = '$USER_ID'" 2>/dev/null | tr -d ' ')
+  psql "$PSQL_URL" -q -c \
+    "UPDATE customer_limits SET max_concurrent_requests = 1 WHERE user_id = '$USER_ID'" >/dev/null 2>&1
+  printf '  info max_concurrent_requests %s -> 1 for this check\n' "${ORIG_CONC:-?}"
+fi
+
+# Two requests at once. The first takes the only slot; the second must be shed.
+for i in 1 2; do
   ( curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/chat/completions" \
       -H "Authorization: Bearer $CONC_KEY" -H 'Content-Type: application/json' \
       -d '{"model":"space-bunny-free","messages":[{"role":"user","content":"say hi"}]}' \
       > "$WORK/conc.$i" ) &
 done
 wait
-for i in $(seq 1 "$CONC_N"); do CONC_CODES="$CONC_CODES $(cat "$WORK/conc.$i" 2>/dev/null)"; done
-printf '  info concurrent status codes:%s\n' "$CONC_CODES"
-if printf '%s' "$CONC_CODES" | grep -q 429; then
-  ok "concurrency limit sheds load with 429"
+C1=$(cat "$WORK/conc.1" 2>/dev/null); C2=$(cat "$WORK/conc.2" 2>/dev/null)
+printf '  info concurrent status codes: %s %s\n' "$C1" "$C2"
+if [ "$C1" = "429" ] || [ "$C2" = "429" ]; then
+  ok "second concurrent request is shed with 429"
 else
-  bad "concurrency limit did not engage (no 429 across $CONC_N requests)"
+  bad "concurrency limit did not engage (got $C1 and $C2, expected one 429)"
 fi
+
+# Restore so later steps and the deployment are left as they were found.
+if [ -n "$ORIG_CONC" ] && [ -n "$PSQL_URL" ]; then
+  psql "$PSQL_URL" -q -c \
+    "UPDATE customer_limits SET max_concurrent_requests = $ORIG_CONC WHERE user_id = '$USER_ID'" >/dev/null 2>&1
+  ok "restored max_concurrent_requests to $ORIG_CONC"
+fi
+
+step "18b. A genuine upstream failure is normalized and leaks nothing"
+# To exercise the real provider-error path against the LIVE OpenCode upstream,
+# we register a temporary model whose public name is one the upstream itself
+# rejects. The platform admits the request (the model is enabled in its
+# registry) and then the real upstream call fails. That is a true provider
+# failure, not edge validation, and it must come back normalized and safe.
+BAD_PUBLIC="smoke-upstream-reject-$(date +%s)"
+BAD_UPSTREAM="smoke-definitely-unsupported-zzz"
+if [ -n "$PSQL_URL" ] && command -v psql >/dev/null 2>&1; then
+  PROVIDER_ID=$(psql "$PSQL_URL" -tAq -c "SELECT id FROM providers WHERE name='opencode' LIMIT 1" 2>/dev/null | tr -d ' ')
+  if [ -n "$PROVIDER_ID" ]; then
+    psql "$PSQL_URL" -q -c \
+      "INSERT INTO models (public_name, provider_id, upstream_model, enabled) VALUES ('$BAD_PUBLIC', '$PROVIDER_ID', '$BAD_UPSTREAM', true)" >/dev/null 2>&1
+    OUT=$(curl -sS -w $'\n%{http_code}' -X POST "$BASE/v1/chat/completions" \
+      -H "Authorization: Bearer $CONC_KEY" -H 'Content-Type: application/json' \
+      -d "{\"model\":\"$BAD_PUBLIC\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+    ST="${OUT##*$'\n'}"; BODY="${OUT%$'\n'*}"
+    printf '  info live upstream rejection -> %s\n' "$ST"
+    case "$ST" in
+      404) ok "upstream ModelError normalized to 404";;
+      502) ok "upstream failure normalized to 502";;
+      *)   bad "unexpected status for live upstream failure: $ST";;
+    esac
+    case "$BODY" in
+      *node_modules*|*"at Object"*|*postgres://*|*"ModelError is not supported"*) bad "provider internals leaked: $BODY";;
+      *) ok "no provider internals in error body";;
+    esac
+    # Clean up the throwaway model so the registry is left as found.
+    psql "$PSQL_URL" -q -c "DELETE FROM models WHERE public_name = '$BAD_PUBLIC'" >/dev/null 2>&1
+    ok "removed temporary failing model"
+  else
+    printf '  \033[33mSKIP\033[0m live upstream failure (opencode provider row not found)\n'
+  fi
+else
+  printf '  \033[33mSKIP\033[0m live upstream failure (no DATABASE_URL/psql)\n'
+fi
+
+step "18c. Stream ends cleanly even when the client stops reading"
+# The server must not leave an upstream socket streaming into a client that has
+# gone away. curl is told to stop after the first frame; the request still has
+# to terminate rather than hang. `head` exiting early can send the pipeline a
+# SIGPIPE (exit 141), which is a normal short-read, not a hang — so 141 is
+# treated as success and only a real timeout (124) is a failure.
+set -o pipefail
+OUT=$(timeout 30 curl -sS -N -X POST "$BASE/v1/chat/completions" \
+  -H "Authorization: Bearer $CONC_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"space-bunny-free","stream":true,"messages":[{"role":"user","content":"Count 1 to 20."}]}' \
+  2>/dev/null | head -c 2000)
+RC=$?
+set +o pipefail
+if [ $RC -eq 124 ]; then
+  bad "stream hung after the client stopped reading"
+else
+  ok "stream terminated after client disconnect (no hang, rc=$RC)"
+fi
+case "$OUT" in *"data: "*) ok "client received stream frames before disconnect";; *) bad "no frames received";; esac
 
 step "19. Disabled key is rejected, re-enable restores it"
 req POST "$BASE/api/keys" \

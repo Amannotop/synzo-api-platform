@@ -11,6 +11,7 @@ import type { AppConfig } from '@synzo/config';
 import { badRequest, conflict, notFoundOrForbidden, HttpError } from '../lib/errors.js';
 import { deriveKeyPrefix, generateApiKeySecret, hashApiKey } from '../lib/crypto.js';
 import { requireSession } from '../middleware/session-auth.js';
+import { filterByAllowedModels, parseAllowedModels } from '../lib/allowed-models.js';
 import type { ProjectRepository } from '../repositories/project.repository.js';
 import type { ApiKeyRepository } from '../repositories/api-key.repository.js';
 import type { RequestRepository } from '../repositories/request.repository.js';
@@ -44,16 +45,6 @@ function fail(issues: { message: string; path: (string | number)[] }[]): never {
  * allowed_models is stored as a JSON array string. A malformed value is
  * treated as "no explicit allowlist" rather than locking the customer out.
  */
-function parseAllowedModels(raw: string | null): string[] {
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.map(String) : [];
-  } catch {
-    return [];
-  }
-}
-
 function rangeToDates(range: string, from?: string, to?: string): { from: Date; to: Date } {
   if (range === 'custom' && from && to) {
     return { from: new Date(from), to: new Date(to) };
@@ -325,9 +316,7 @@ export async function registerCustomerRoutes(app: FastifyInstance, deps: Custome
     }));
 
     const raw = await deps.users.getLimits(user.userId);
-    const allowed = raw.allowedModels
-      ? all.filter((m) => parseAllowedModels(raw.allowedModels).includes(m.publicName))
-      : all;
+    const allowed = filterByAllowedModels(all, parseAllowedModels(raw.allowedModels), (m) => m.publicName);
 
     return {
       models: allowed,
