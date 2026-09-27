@@ -1,0 +1,9 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# pnpm 11 requires an explicit allow/deny decision for every dependency that
+# runs an install script. esbuild downloads a prebuilt platform binary that
+# Vite, Vitest and tsx all need at runtime.
+allowBuilds:
+  esbuild: true

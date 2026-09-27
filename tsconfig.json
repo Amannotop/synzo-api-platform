@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@synzo/types": ["packages/types/src/index.ts"],
+      "@synzo/validation": ["packages/validation/src/index.ts"],
+      "@synzo/config": ["packages/config/src/index.ts"],
+      "@synzo/database": ["packages/database/src/index.ts"]
+    }
+  },
+  "include": [
+    "apps/api/src/**/*.ts",
+    "apps/api/test/**/*.ts",
+    "packages/*/src/**/*.ts",
+    "vitest.config.ts"
+  ],
+  "exclude": ["node_modules", "**/dist/**", "apps/dashboard"]
+}
