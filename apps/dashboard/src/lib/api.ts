@@ -74,6 +74,17 @@ export const api = {
   changePassword: (input: { currentPassword: string; newPassword: string }) =>
     post<{ ok: boolean; reauthenticate: true }>('/api/me/password', input),
 
+  // --- account recovery / verification (§8) ---
+  // `forgotPassword` always resolves the same way whether or not the address
+  // exists, so the UI must not imply that it did.
+  forgotPassword: (email: string) =>
+    post<{ ok: boolean; message: string }>('/api/auth/password/forgot', { email }),
+  resetPassword: (token: string, password: string) =>
+    post<{ ok: boolean; reauthenticate: true }>('/api/auth/password/reset', { token, password }),
+  verifyEmail: (token: string) => post<{ ok: boolean; emailVerified: boolean }>('/api/auth/email/verify', { token }),
+  resendVerification: () =>
+    post<{ ok: boolean; emailVerified: boolean; resent: boolean }>('/api/auth/email/resend', {}),
+
   // --- dashboard data ---
   overview: () => request<Overview>('/api/overview'),
   models: () => request<{ models: Model[]; providers: Provider[] }>('/api/models'),

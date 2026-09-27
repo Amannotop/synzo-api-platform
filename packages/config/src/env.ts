@@ -119,6 +119,19 @@ const envSchema = z.object({
   ALLOW_LIVE_KEYS: boolFromString.default('false'),
 
   DASHBOARD_ORIGIN: z.string().default('http://localhost:5173'),
+
+  // --- Account recovery / verification (§8) -------------------------------
+  // Public origin of the deployment. Used to build the links in reset and
+  // verification emails; it must be the address a customer can actually reach.
+  PUBLIC_BASE_URL: z.string().default('http://localhost:5173'),
+  /**
+   * Where password-reset and verification emails go. 'log' is development and
+   * test only and is rejected in production, because writing a live reset link
+   * to stdout would put a working credential in the log pipeline.
+   */
+  MAIL_TRANSPORT: z.enum(['smtp', 'log']).default('log'),
+  MAIL_FROM: z.string().default('Synzo <no-reply@synzo.local>'),
+  SMTP_URL: optionalSecret,
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -159,6 +172,8 @@ export interface AppConfig {
   admin: { email: string | undefined; password: string | undefined };
   cors: { allowList: string[]; allowCredentials: boolean };
   dashboardOrigin: string;
+  publicBaseUrl: string;
+  mail: { transport: 'smtp' | 'log'; from: string; smtpUrl: string | undefined };
   logging: { level: string; logRequestContent: boolean; logRequestContentMaxChars: number };
   providerHealth: { enabled: boolean; intervalMs: number };
   features: { registrationEnabled: boolean; allowLiveKeys: boolean };
@@ -189,6 +204,33 @@ export function buildConfig(env: Env): AppConfig {
   const origins = env.CORS_ORIGINS.split(',')
     .map((o) => o.trim())
     .filter((o) => o.length > 0);
+
+  /**
+   * Cross-field rules that a per-field schema cannot express.
+   *
+   * The important one: writing reset links to stdout is fine locally and is a
+   * credential leak in production, where stdout is shipped to log aggregation
+   * and readable by anyone with log access. Failing at startup is the only
+   * point where this is still cheap to notice.
+   */
+  if (env.NODE_ENV === 'production') {
+    if (env.MAIL_TRANSPORT === 'log') {
+      throw new Error(
+        'Invalid environment configuration:\n  - MAIL_TRANSPORT: "log" is not allowed when NODE_ENV=production. ' +
+          'Set MAIL_TRANSPORT=smtp and SMTP_URL, or account recovery emails will be written to the log stream.',
+      );
+    }
+    if (!env.SMTP_URL) {
+      throw new Error(
+        'Invalid environment configuration:\n  - SMTP_URL: required when NODE_ENV=production and MAIL_TRANSPORT=smtp.',
+      );
+    }
+    if (!env.SESSION_COOKIE_SECURE) {
+      throw new Error(
+        'Invalid environment configuration:\n  - SESSION_COOKIE_SECURE: must be true when NODE_ENV=production.',
+      );
+    }
+  }
 
   return {
     env: env.NODE_ENV,
@@ -244,6 +286,12 @@ export function buildConfig(env: Env): AppConfig {
     },
     cors: { allowList: origins, allowCredentials: true } satisfies CorsOrigins,
     dashboardOrigin: env.DASHBOARD_ORIGIN,
+    publicBaseUrl: env.PUBLIC_BASE_URL.replace(/\/+$/, ''),
+    mail: {
+      transport: env.MAIL_TRANSPORT,
+      from: env.MAIL_FROM,
+      smtpUrl: env.SMTP_URL,
+    },
     logging: {
       level: env.LOG_LEVEL,
       logRequestContent: env.LOG_REQUEST_CONTENT,

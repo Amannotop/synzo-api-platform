@@ -90,6 +90,13 @@ export class UserRepository {
     await this.db.update(users).set({ passwordHash, updatedAt: new Date() }).where(eq(users.id, id));
   }
 
+  async markEmailVerified(id: string): Promise<void> {
+    await this.db
+      .update(users)
+      .set({ emailVerified: true, updatedAt: new Date() })
+      .where(eq(users.id, id));
+  }
+
   async updateStatus(id: string, status: 'active' | 'suspended'): Promise<void> {
     await this.db.update(users).set({ status, updatedAt: new Date() }).where(eq(users.id, id));
   }

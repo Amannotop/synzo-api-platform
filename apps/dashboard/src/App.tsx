@@ -12,6 +12,8 @@ import Documentation from './pages/Documentation';
 import Settings from './pages/Settings';
 import Admin from './pages/Admin';
 import NotFound from './pages/NotFound';
+import ResetPassword from './pages/ResetPassword';
+import VerifyEmail from './pages/VerifyEmail';
 
 /** Blocks a route until the session is known, so we never flash the login
  *  screen at a customer who is already signed in. */
@@ -47,6 +49,10 @@ export default function App() {
         path="/signin"
         element={loading ? null : user ? <Navigate to="/" replace /> : <SignIn />}
       />
+      {/* Reachable signed-out: these are the landing pages for the links in a
+          reset or verification email, so they must render without a session. */}
+      <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/verify-email" element={<VerifyEmail />} />
       <Route
         element={
           <RequireAuth>

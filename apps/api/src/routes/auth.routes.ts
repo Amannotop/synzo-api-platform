@@ -12,6 +12,7 @@ import type { SessionRepository } from '../repositories/session.repository.js';
 import type { AuditRepository } from '../repositories/audit.repository.js';
 import type { Redis } from 'ioredis';
 import type { RateLimitService } from '../services/rate-limit.service.js';
+import type { AccountTokenService } from '../services/account-token.service.js';
 
 interface AuthDeps {
   config: AppConfig;
@@ -21,6 +22,7 @@ interface AuthDeps {
   audit: AuditRepository;
   redis: Redis;
   rateLimiter: RateLimitService;
+  accountTokens: AccountTokenService;
 }
 
 function meta(request: FastifyRequest) {
@@ -31,7 +33,7 @@ function meta(request: FastifyRequest) {
 }
 
 export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): Promise<void> {
-  const { config, users, sessions, sessionService, audit, redis, rateLimiter } = deps;
+  const { config, users, sessions, sessionService, audit, redis, rateLimiter, accountTokens } = deps;
 
   /**
    * Brute-force protection keyed by email+IP (§31). A successful login clears
@@ -71,6 +73,16 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
 
     const passwordHash = await hashPassword(password);
     const created = await users.create({ email, passwordHash, name });
+
+    // A brand-new account is unverified. The verification token is the only
+    // proof that whoever registered controls the address, so it is issued here
+    // rather than waiting to be requested: a customer who never sees the email
+    // still has Settings > Resend when they notice.
+    await accountTokens.issue(
+      { id: created.id, email },
+      'email_verification',
+      meta(request),
+    );
 
     await audit.record({
       actorUserId: created.id,

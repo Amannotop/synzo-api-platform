@@ -47,6 +47,21 @@ export default function Settings() {
     onError: (err) => toast.push('error', 'Could not change password', message(err)),
   });
 
+  const resendVerification = useMutation({
+    mutationFn: () => api.resendVerification(),
+    onSuccess: (res) => {
+      toast.push(
+        'success',
+        res.resent ? 'Verification email sent' : 'Already verified',
+        res.resent
+          ? `Check ${user?.email} for a new confirmation link.`
+          : 'This address is already confirmed.',
+      );
+      if (res.emailVerified) void refresh();
+    },
+    onError: (err) => toast.push('error', 'Could not send the email', message(err)),
+  });
+
   return (
     <>
       <div className="page-head">
@@ -55,6 +70,23 @@ export default function Settings() {
           <p>Your account, your current limits and how the dashboard looks.</p>
         </div>
       </div>
+
+      {!user.emailVerified && (
+        <Alert kind="warning">
+          <div className="row-between wrap">
+            <span>
+              Your email address is <strong>not verified</strong>. Some features stay locked until
+              you confirm <span className="inline-code">{user.email}</span>.
+            </span>
+            <Button
+              onClick={() => resendVerification.mutate()}
+              loading={resendVerification.isPending}
+            >
+              Resend email
+            </Button>
+          </div>
+        </Alert>
+      )}
 
       <div className="grid grid-2">
         <Card title="Account">
@@ -159,6 +191,7 @@ export default function Settings() {
             <li>Passwords are stored as salted scrypt hashes, never in plaintext.</li>
             <li>Sessions are stored server-side in an httpOnly cookie.</li>
             <li>Request and response content is not stored.</li>
+            <li>Password reset links are single-use and expire after 60 minutes.</li>
           </ul>
         </Card>
       </div>

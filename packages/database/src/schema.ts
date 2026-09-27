@@ -21,6 +21,10 @@ export const userStatus = pgEnum('user_status', ['active', 'suspended', 'pending
 export const keyStatus = pgEnum('key_status', ['active', 'disabled', 'revoked']);
 export const keyEnvironment = pgEnum('key_environment', ['live', 'test']);
 export const requestStatus = pgEnum('request_status', ['success', 'error', 'cancelled']);
+export const accountTokenPurpose = pgEnum('account_token_purpose', [
+  'password_reset',
+  'email_verification',
+]);
 
 /* ---------------------------------------------------------------- providers */
 
@@ -263,6 +267,33 @@ export const sessions = pgTable(
   (t) => [index('sessions_user_idx').on(t.userId), index('sessions_expires_idx').on(t.expiresAt)],
 );
 
+/**
+ * Single-use, hashed tokens for password reset and email verification (§8).
+ *
+ * Only the SHA-256 digest is stored, so a leaked database dump cannot be
+ * replayed as a working reset link. The raw token lives only in the email.
+ */
+export const accountTokens = pgTable(
+  'account_tokens',
+  {
+    id: id(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: varchar('token_hash', { length: 64 }).notNull().unique(),
+    purpose: accountTokenPurpose('purpose').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    ip: varchar('ip', { length: 64 }),
+    userAgent: varchar('user_agent', { length: 500 }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('account_tokens_user_purpose_idx').on(t.userId, t.purpose),
+    index('account_tokens_expires_idx').on(t.expiresAt),
+  ],
+);
+
 export const auditLogs = pgTable(
   'audit_logs',
   {
@@ -317,3 +348,4 @@ export type Model = typeof models.$inferSelect;
 export type Provider = typeof providers.$inferSelect;
 export type RequestRecord = typeof requests.$inferSelect;
 export type CustomerLimits = typeof customerLimits.$inferSelect;
+export type AccountToken = typeof accountTokens.$inferSelect;

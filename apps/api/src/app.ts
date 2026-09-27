@@ -9,6 +9,8 @@ import { createLogger, type Logger } from './lib/logger.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { createSessionResolver, SessionService } from './middleware/session-auth.js';
 import { ProviderRegistry } from './providers/provider.registry.js';
+import { AccountTokenService } from './services/account-token.service.js';
+import { accountTokenMail, createMailer } from './lib/mailer.js';
 import { RateLimitService } from './services/rate-limit.service.js';
 import { ChatService } from './services/chat.service.js';
 import { ProviderHealthMonitor } from './services/provider-health.service.js';
@@ -24,6 +26,7 @@ import { registerCustomerRoutes } from './routes/customer.routes.js';
 import { registerAdminRoutes } from './routes/admin.routes.js';
 import { registerChatRoutes } from './routes/chat.routes.js';
 import { registerSystemRoutes } from './routes/system.routes.js';
+import { registerAccountRoutes } from './routes/account.routes.js';
 
 export interface AppDeps {
   config: AppConfig;
@@ -86,6 +89,25 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
   const rateLimiter = new RateLimitService(redis, logger);
   const sessionService = new SessionService(config, sessions);
   const health = new ProviderHealthMonitor(config, providers, logger);
+  const mailer = createMailer(config);
+  const accountTokens = new AccountTokenService({
+    db,
+    config,
+    logger,
+    deliver: async ({ email, purpose, raw, expiresAt }) => {
+      // Delivery failures must not surface as "we emailed you" when we did not,
+      // and must not take the request down either: the row is already written
+      // and the customer can retry.
+      try {
+        await mailer.send(accountTokenMail(config, { to: email, purpose, raw, expiresAt }));
+      } catch (err) {
+        logger.error('Failed to deliver account token email', {
+          purpose,
+          error: err instanceof Error ? err.message : 'unknown',
+        });
+      }
+    },
+  });
   const chatService = new ChatService({
     config,
     logger,
@@ -101,7 +123,25 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
 
   await registerSystemRoutes(app, { config, db, redis, models, apiKeys, users, health });
   await registerChatRoutes(app, { config, logger, chatService, apiKeys, users, models });
-  await registerAuthRoutes(app, { config, users, sessions, sessionService, audit, redis, rateLimiter });
+  await registerAuthRoutes(app, {
+    config,
+    users,
+    sessions,
+    sessionService,
+    audit,
+    redis,
+    rateLimiter,
+    accountTokens,
+  });
+  await registerAccountRoutes(app, {
+    config,
+    users,
+    sessions,
+    sessionService,
+    accountTokens,
+    audit,
+    redis,
+  });
   await registerCustomerRoutes(app, { config, projects, apiKeys, requestsRepo, users, audit, models });
   await registerAdminRoutes(app, { users, models, requestsRepo, audit, health });
 

@@ -8,6 +8,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
+import { loadEnv } from '@synzo/config';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, '..', 'migrations');
@@ -58,9 +59,13 @@ export async function runMigrations(connectionString: string): Promise<Migration
 
 const isDirectRun = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '');
 if (isDirectRun) {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.error('DATABASE_URL is required to run migrations');
+  // Goes through the same loader as the API, so `pnpm migrate` picks up the
+  // repository .env instead of demanding the variable be exported by hand.
+  let url: string;
+  try {
+    url = loadEnv().DATABASE_URL;
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
   runMigrations(url)
