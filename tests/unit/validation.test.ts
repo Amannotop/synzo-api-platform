@@ -10,7 +10,13 @@ import {
   buildChatRequestSchema,
 } from '@synzo/validation';
 
-const LIMITS = { maxMessages: 200, maxMessageChars: 100_000, maxContentTokensHardCap: 200_000 };
+const LIMITS = {
+  maxMessages: 200,
+  maxMessageChars: 100_000,
+  maxContentTokensHardCap: 200_000,
+  maxImagesPerRequest: 8,
+  maxImageBytes: 5_000_000,
+};
 const chatSchema = buildChatRequestSchema(LIMITS);
 
 describe('registerSchema', () => {
@@ -335,5 +341,119 @@ describe('buildChatRequestSchema — tool calling', () => {
     });
     expect(r.success).toBe(false);
     if (!r.success) expect(r.error.issues[0].path).toEqual(['messages', 1, 'content']);
+  });
+});
+
+/**
+ * Image input.
+ *
+ * The shape is OpenAI's: `content` stays a bare string for a text-only client,
+ * and only becomes an array when a client actually attaches an image. So most of
+ * what matters here is the boundary — what an image URL is allowed to be, and
+ * what happens when the operator turns image input off entirely.
+ */
+describe('buildChatRequestSchema — image input', () => {
+  const ok = { model: 'gpt-4o', messages: [{ role: 'user' as const, content: 'hi' }] };
+  // 1x1 PNG: the payload is irrelevant to the schema, only its declared type and
+  // its decoded length are.
+  const PNG =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+  it('leaves a plain string message exactly as it was', () => {
+    const r = chatSchema.parse(ok);
+    expect(r.messages[0].content).toBe('hi');
+  });
+
+  it('accepts a base64 data: URL and keeps the part intact', () => {
+    const r = chatSchema.safeParse({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'what is this?' },
+            { type: 'image_url', image_url: { url: PNG, detail: 'low' } },
+          ],
+        },
+      ],
+    });
+    expect(r.success).toBe(true);
+    if (r.success) {
+      const parts = r.data.messages[0].content as { type: string }[];
+      expect(parts.map((p) => p.type)).toEqual(['text', 'image_url']);
+    }
+  });
+
+  it('accepts a remote image only over https', () => {
+    const https = { model: 'gpt-4o', messages: [{ role: 'user', content: [
+      { type: 'image_url', image_url: { url: 'https://example.com/a.png' } },
+    ] }] };
+    expect(chatSchema.safeParse(https).success).toBe(true);
+
+    // The QR rule, applied to a model input: a URL swapped in transit shows the
+    // model something the customer never chose.
+    const http = { model: 'gpt-4o', messages: [{ role: 'user', content: [
+      { type: 'image_url', image_url: { url: 'http://example.com/a.png' } },
+    ] }] };
+    expect(chatSchema.safeParse(http).success).toBe(false);
+  });
+
+  it('rejects an image type outside png, jpeg and webp', () => {
+    const svg = { model: 'gpt-4o', messages: [{ role: 'user', content: [
+      { type: 'image_url', image_url: { url: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=' } },
+    ] }] };
+    expect(chatSchema.safeParse(svg).success).toBe(false);
+  });
+
+  it('rejects a non-base64 data: URL', () => {
+    const plain = { model: 'gpt-4o', messages: [{ role: 'user', content: [
+      { type: 'image_url', image_url: { url: 'data:image/png,not-base64' } },
+    ] }] };
+    expect(chatSchema.safeParse(plain).success).toBe(false);
+  });
+
+  it('rejects an image whose decoded size is over the limit', () => {
+    // A base64 payload long enough to decode past maxImageBytes. The header
+    // claims a tiny image; only the decoded length is checked, which is the
+    // number that actually reaches the provider.
+    const oversized = `data:image/png;base64,${'A'.repeat(8 * 1024 * 1024)}`;
+    expect(chatSchema.safeParse({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: oversized } }] }],
+    }).success).toBe(false);
+  });
+
+  it('counts images across the whole conversation, not per message', () => {
+    // Replaying history would otherwise hand the client a fresh budget per turn
+    // and smuggle an unbounded number of images into one billed request.
+    const many = Array.from({ length: LIMITS.maxImagesPerRequest + 1 }, () => ({
+      role: 'user' as const,
+      content: [{ type: 'image_url' as const, image_url: { url: PNG } }],
+    }));
+    expect(chatSchema.safeParse({ model: 'gpt-4o', messages: many }).success).toBe(false);
+  });
+
+  it('still bounds the text of a text part', () => {
+    const r = chatSchema.safeParse({
+      model: 'gpt-4o',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'x'.repeat(LIMITS.maxMessageChars + 1) }],
+      }],
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues[0].path).toEqual(['messages', 0, 'content', 0, 'text']);
+  });
+
+  it('refuses every image when the operator has turned image input off', () => {
+    const off = buildChatRequestSchema({ ...LIMITS, maxImagesPerRequest: 0 });
+    const r = off.safeParse({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: PNG } }] }],
+    });
+    expect(r.success).toBe(false);
+    // A text-only request is unaffected, so disabling images cannot take the
+    // text API down with it.
+    expect(off.safeParse(ok).success).toBe(true);
   });
 });

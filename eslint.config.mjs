@@ -21,6 +21,10 @@ const ignores = [
   // belong to code nobody is shipping.
   '.kilo/**',
   '.git/**',
+  // Agent scratch: untracked browser-automation scripts and screenshots used
+  // while auditing the UI. Not part of the build, so linting them reports
+  // errors in code nobody ships.
+  'tmp/**',
 ];
 
 export default tseslint.config(

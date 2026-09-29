@@ -1,7 +1,10 @@
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 import type { Database } from '@synzo/database';
-import { customerLimits, users, type CustomerLimits } from '@synzo/database';
+import { creditBalances, customerLimits, users, type CustomerLimits } from '@synzo/database';
 import type { AppConfig } from '@synzo/config';
+
+/** Every status an account can hold, mirroring the `user_status` enum. */
+export type UserStatus = 'active' | 'suspended' | 'pending' | 'rejected';
 
 export class UserRepository {
   constructor(
@@ -35,15 +38,32 @@ export class UserRepository {
    * Creates a user together with their default limits in one transaction, so a
    * customer can never exist without a limits row.
    *
-   * The very first account becomes admin, which removes the chicken-and-egg
-   * problem of having no way to reach the admin APIs. Once any admin exists
-   * this no longer applies, so a later signup can never self-promote.
+   * Admin bootstrap, in priority order:
+   *
+   *  1. `ADMIN_EMAIL` matching the signup, when configured. This is the
+   *     authoritative path and the one an operator should rely on.
+   *  2. The very first account on the instance, only while no admin exists at
+   *     all. This removes the chicken-and-egg problem of having no way to
+   *     reach the admin APIs, and is what makes the platform usable with zero
+   *     configuration.
+   *
+   * Once any admin exists, neither applies and a later signup can never
+   * self-promote.
    */
   async create(input: {
     email: string;
     passwordHash: string;
     name: string;
-  }): Promise<{ id: string; role: string }> {
+    /**
+     * The status to register the account with.
+     *
+     * Explicit rather than inferred here, because whether a new signup starts
+     * as 'pending' is a deployment policy (APPROVAL_REQUIRED), not a fact this
+     * repository should know. The founding admin is always 'active' regardless:
+     * there is nobody to approve them.
+     */
+    status?: UserStatus;
+  }): Promise<{ id: string; role: string; status: UserStatus }> {
     return this.db.transaction(async (tx) => {
       const [existingAdmin] = await tx
         .select({ id: users.id })
@@ -51,8 +71,33 @@ export class UserRepository {
         .where(eq(users.role, 'admin'))
         .limit(1);
 
+      /*
+       * `ADMIN_EMAIL` wins over the first-admin fallback.
+       *
+       * With only the fallback, the operator's own deploy sequence decides who
+       * is the admin: whoever happens to register first on a fresh instance
+       * gets full control of the platform, and on a publicly reachable signup
+       * form that is whoever reached it first — not the person running the
+       * deployment. `ADMIN_EMAIL` makes the answer explicit and reviewable.
+       *
+       * Case-insensitive because an operator typing their address into .env
+       * should not be silently downgraded to a customer for capitalising it,
+       * and because lookups elsewhere in this repository are already
+       * case-insensitive.
+       */
+      const configuredAdmin = this.config.admin.email;
+      const isConfiguredAdmin =
+        configuredAdmin != null &&
+        configuredAdmin.length > 0 &&
+        configuredAdmin.toLowerCase() === input.email.toLowerCase();
+
       const isFirstAdmin = !existingAdmin;
-      const role = isFirstAdmin ? 'admin' : 'customer';
+      const isAdmin = isConfiguredAdmin || isFirstAdmin;
+      const role = isAdmin ? 'admin' : 'customer';
+
+      // An admin cannot be 'pending' — nobody is left to approve them. This
+      // is the one place the caller-supplied status is overridden.
+      const status: UserStatus = isAdmin ? 'active' : (input.status ?? 'active');
 
       const [created] = await tx
         .insert(users)
@@ -61,9 +106,10 @@ export class UserRepository {
           passwordHash: input.passwordHash,
           name: input.name,
           role,
+          status,
           // The founding admin may mint live keys immediately; everyone else
           // needs an explicit grant.
-          allowLiveKeys: isFirstAdmin ? this.config.features.allowLiveKeys : false,
+          allowLiveKeys: isAdmin ? this.config.features.allowLiveKeys : false,
         })
         .returning({ id: users.id, role: users.role });
 
@@ -76,10 +122,60 @@ export class UserRepository {
         requestsPerDay: d.requestsPerDay,
         tokensPerDay: d.tokensPerDay,
         maxConcurrentRequests: d.maxConcurrentRequests,
+        /**
+         * An empty array, not NULL, and the distinction is load-bearing.
+         *
+         * NULL means "every model is allowed" — it is what a customer who buys
+         * the top tier holds. Leaving a new account's row NULL therefore claimed
+         * they had already been granted everything, which made the entry
+         * package's model list union away to nothing and left every new customer
+         * able to call all six models. `[]` is the honest state for "granted
+         * nothing yet", and `parseAllowedModels` already reads it as exactly
+         * that.
+         */
+        allowedModels: '[]',
+        // A new account has been granted nothing, which is 0 images. The base
+        // values are written alongside so an expiry reverts to exactly this.
+        maxImages: 0,
+        baseAllowedModels: '[]',
+        baseMaxImages: 0,
+        planExpiresAt: null,
       });
 
-      return { id: created.id, role: created.role };
+      /**
+       * The zero balance row is created HERE, in the same transaction as the
+       * account, rather than lazily on first credit read.
+       *
+       * It is all zeros — no free trial, because the spec is explicit that
+       * credits are granted on approval and not at registration. What it buys
+       * is that every account has a balances row from the moment it exists, so
+       * the credit tables can be joined against `users` without a LEFT JOIN and
+       * a COALESCE, and so an admin listing customers can show a real balance
+       * for a brand-new account rather than a blank cell.
+       */
+      await tx.insert(creditBalances).values({ userId: created.id }).onConflictDoNothing();
+
+      return { id: created.id, role: created.role, status };
     });
+  }
+
+  /** Counts accounts awaiting a decision, for the admin dashboard badge. */
+  async countByStatus(status: UserStatus): Promise<number> {
+    const rows = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(users)
+      .where(eq(users.status, status));
+    return rows[0]?.n ?? 0;
+  }
+
+  /** Every account awaiting review, oldest first — the approval queue. */
+  async listPending(limit = 200): Promise<(typeof users.$inferSelect)[]> {
+    return this.db
+      .select()
+      .from(users)
+      .where(eq(users.status, 'pending'))
+      .orderBy(sql`${users.createdAt} asc`)
+      .limit(limit);
   }
 
   async touchLastLogin(id: string): Promise<void> {
@@ -97,7 +193,7 @@ export class UserRepository {
       .where(eq(users.id, id));
   }
 
-  async updateStatus(id: string, status: 'active' | 'suspended'): Promise<void> {
+  async updateStatus(id: string, status: UserStatus): Promise<void> {
     await this.db.update(users).set({ status, updatedAt: new Date() }).where(eq(users.id, id));
   }
 
@@ -188,6 +284,15 @@ export class UserRepository {
         tokensPerDay: d.tokensPerDay,
         maxConcurrentRequests: d.maxConcurrentRequests,
         allowedModels: null,
+        // Absent a row, the fallback grants no images at all. Failing closed
+        // matters here: 0 is "no image input", and an unreadable limits row must
+        // not hand out a capability the operator had to opt into. The paired
+        // base values must match, or a later expiry would revert to a grant
+        // this fallback never gave.
+        maxImages: 0,
+        baseAllowedModels: null,
+        baseMaxImages: 0,
+        planExpiresAt: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       }

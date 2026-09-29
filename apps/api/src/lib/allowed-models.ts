@@ -31,6 +31,38 @@ export function parseAllowedModels(raw: string | null | undefined): string[] | n
 }
 
 /**
+ * Combines a customer's current access with a package's, keeping the union.
+ *
+ * A purchase only ever ADDS access, so this has to be a union rather than an
+ * overwrite in all three states:
+ *
+ *   null + null            = null  (all)
+ *   null + [a, b]          = null  (already everything, stays everything)
+ *   [a, b] + null          = null  (the new package grants everything)
+ *   [a, b] + [b, c]        = [a, b, c]
+ *
+ * Overwriting instead would mean a customer who bought the top tier and later
+ * bought the cheapest one was silently downgraded to two models, with nothing
+ * recorded and no way for them to tell that is what happened.
+ *
+ * The current value is read through `parseAllowedModels`, so a corrupt stored
+ * value unions as "nothing" and therefore fails closed.
+ */
+export function unionAllowedModels(
+  current: string | null | undefined,
+  incoming: string | null | undefined,
+): string | null {
+  const a = parseAllowedModels(current);
+  const b = parseAllowedModels(incoming);
+  if (a === null || b === null) return null;
+  // The column holds a JSON array STRING, not an array, so the union is
+  // re-encoded on the way out. Order is not meaningful for membership, but
+  // sorting keeps the stored value stable so an unchanged union does not churn
+  // the row's bytes and its updatedAt on every purchase.
+  return JSON.stringify([...new Set([...a, ...b])].sort());
+}
+
+/**
  * Applies an allowlist to a set of models.
  *
  * `null` passes everything through; an array is an exact-membership filter, so

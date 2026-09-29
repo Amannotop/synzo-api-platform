@@ -2,7 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '@synzo/config';
 import { assistantDisplayName, buildIdentityInstruction, modelExternalName, modelResponseName, resolveModelAlias } from '@synzo/config';
 import type { ChatMessage } from '@synzo/types';
-import { HttpError, notFound, upstreamTimeout } from '../lib/errors.js';
+import { countImageParts } from '@synzo/types';
+import {
+  HttpError,
+  imageLimitExceeded,
+  imageSupportRequired,
+  notFound,
+  upstreamTimeout,
+} from '../lib/errors.js';
 import { parseAllowedModels } from '../lib/allowed-models.js';
 import type { Logger } from '../lib/logger.js';
 import type { AIProvider, ChatTool, NormalizedUsage, ToolChoice } from '../providers/provider.interface.js';
@@ -12,6 +19,8 @@ import type { RequestRepository, RecordRequestInput } from '../repositories/requ
 import type { AdmissionLease, RateLimitInput, RateLimitService } from './rate-limit.service.js';
 import type { ApiKeyContext } from '../middleware/api-key-auth.js';
 import type { Metrics } from '../metrics/registry.js';
+import type { CreditService } from './credit.service.js';
+import type { Reservation } from '../repositories/credit.repository.js';
 
 export interface ChatServiceDeps {
   config: AppConfig;
@@ -20,6 +29,12 @@ export interface ChatServiceDeps {
   providers: ProviderRegistry;
   requestsRepo: RequestRepository;
   rateLimiter: RateLimitService;
+  /**
+   * Credit accounting. Optional so a caller that only exercises the model
+   * resolution path does not have to construct a balance table; when it is
+   * absent the service behaves exactly as it did before credits existed.
+   */
+  credits?: CreditService;
   /** Optional: a caller that only needs completions need not build a registry. */
   metrics?: Metrics;
 }
@@ -58,6 +73,39 @@ export interface ResolvedChatRequest {
    * once; `release()` is idempotent so overlapping paths are safe.
    */
   lease: AdmissionLease;
+  /**
+   * The credits this request claimed before the upstream was called, or null
+   * for an account exempt from credit accounting.
+   *
+   * Whoever finishes the request must settle or release it exactly once. The
+   * repository makes both idempotent, so the streaming path, the non-streaming
+   * path and a client disconnect can each arrive here without any of them
+   * being able to double-spend or double-refund.
+   */
+  reservation: Reservation | null;
+  /**
+   * Image allowance claimed by this request, for a hand-back on a failure path.
+   * 0 when the request carried no images or the plan is unlimited.
+   *
+   * The user id travels with it because `release()` is called from the streaming
+   * and disconnect paths, which do not carry the auth context.
+   */
+  claimedImages: number;
+  claimedImagesUserId: string;
+}
+
+/**
+ * How long the image counter should live: the time left on the plan.
+ *
+ * A trial has no expiry, so it gets a long finite life. A TTL is used rather
+ * than "no expiry" so the key cannot outlive the deployment, and so a customer
+ * who later buys a real plan starts from a clean counter.
+ */
+function imageTtlSeconds(planExpiresAt: Date | null): number {
+  const YEAR = 365 * 24 * 60 * 60;
+  if (!planExpiresAt) return YEAR;
+  const remaining = (planExpiresAt.getTime() - Date.now()) / 1000;
+  return Math.max(60, remaining);
 }
 
 export function generateRequestId(): string {
@@ -158,13 +206,86 @@ export class ChatService {
     const provider = this.deps.providers.getOrThrow(model.provider);
     const stream = body.stream === true;
 
+    /**
+     * Image entitlement is checked before the rate-limit slot is taken, and for
+     * the same reason the model lookup is: a request that can never be served
+     * must not consume admission, and must not reach the credit reservation
+     * either. A customer on a text-only plan can send images all day and be
+     * refused every time without ever touching a rate-limit counter.
+     *
+     * The allowance is a TOTAL for the subscription period, not a per-request
+     * cap — a plan that includes three images has three images for the length of
+     * the plan. It is therefore CLAIMED, not merely compared, so concurrent
+     * requests cannot each observe room for themselves and jointly overspend.
+     *
+     * `maxImages` is per plan: 0 = none, a number = that many for the period,
+     * null = unlimited. The platform ceiling in the request schema still applies
+     * above it, so null means "as many as the platform will accept".
+     *
+     * Checked after the model, so a request for a model that is not on the plan
+     * reports `invalid_model` and discloses nothing about the image rule.
+     */
+    const images = countImageParts(body.messages);
+    let claimedImages = 0;
+    if (images > 0) {
+      const { maxImages } = ctx.limits;
+      if (maxImages === 0) throw imageSupportRequired();
+      if (maxImages !== null) {
+        const ok = await this.deps.rateLimiter.consumeImageAllowance({
+          userId: ctx.userId,
+          count: images,
+          allowance: maxImages,
+          /**
+           * The counter lives only as long as the plan does. A trial never
+           * expires, so the key is given a long-but-finite life: long enough
+           * that it is never the thing that resets, short enough that a key
+           * cannot outlive the deployment by much.
+           */
+          ttlSeconds: imageTtlSeconds(ctx.limits.planExpiresAt),
+        });
+        if (!ok) throw imageLimitExceeded({ limit: maxImages, sent: images });
+        claimedImages = images;
+      }
+    }
+
     // Admission is the LAST thing prepare does. If the model is unknown the
     // customer is not charged a rate-limit slot for a request that could
     // never have been served.
     const lease = await this.deps.rateLimiter.checkAndConsume(this.limitInput(ctx));
 
+    const requestId = generateRequestId();
+
+    /**
+     * Credits are claimed after admission and before the provider is ever
+     * called. That ordering is the guarantee: a request that cannot be paid
+     * for is refused here, so no tokens are spent upstream on a response the
+     * customer is not entitled to. Claiming worst-case rather than waiting for
+     * real usage is what makes concurrent requests unable to overspend.
+     *
+     * If this throws (the balance is exhausted), the rate-limit slot taken
+     * above has to go back, or a customer who is out of credits would also
+     * slowly exhaust their request quota by trying.
+     */
+    let reservation: Reservation | null = null;
+    if (this.deps.credits) {
+      const estimate = this.deps.credits.estimateMaxTokens({
+        messages: body.messages,
+        maxTokens: body.max_tokens,
+      });
+      try {
+        reservation = await this.deps.credits.reserve(
+          { userId: ctx.userId, unlimited: ctx.unlimited },
+          requestId,
+          estimate,
+        );
+      } catch (err) {
+        await lease.release();
+        throw err;
+      }
+    }
+
     return {
-      requestId: generateRequestId(),
+      requestId,
       modelName: model.publicName,
       upstreamModel: model.upstreamModel,
       modelId: model.id,
@@ -176,6 +297,9 @@ export class ChatService {
       toolChoice: body.tool_choice,
       requestContent: this.captureContent(body.messages),
       lease,
+      reservation,
+      claimedImages,
+      claimedImagesUserId: ctx.userId,
     };
   }
 
@@ -185,6 +309,18 @@ export class ChatService {
    */
   async release(resolved: ResolvedChatRequest): Promise<void> {
     await resolved.lease.release();
+    if (resolved.claimedImages > 0) {
+      await this.deps.rateLimiter.releaseImageAllowance(
+        resolved.claimedImagesUserId,
+        resolved.claimedImages,
+      );
+    }
+    if (this.deps.credits) {
+      await this.deps.credits.release(
+        { userId: resolved.reservation?.userId ?? '', unlimited: false },
+        resolved.reservation,
+      );
+    }
   }
 
   private baseRecord(
@@ -212,9 +348,20 @@ export class ChatService {
     };
   }
 
-  /** Records a failed request. Never throws — accounting must not mask the real error. */
+  /**
+   * Records a failed request. Never throws — accounting must not mask the real
+   * error.
+   *
+   * The reservation is released here rather than settled. A request that
+   * errored produced no usable output, so charging for the worst case would
+   * bill the customer for a response they never received. If the upstream
+   * partly answered before failing, the operator can reconcile from the
+   * `requests` row; the alternative — freezing the worst-case estimate
+   * indefinitely — is strictly worse for the customer.
+   */
   private async recordQuietly(
     record: RecordRequestInput,
+    ctx: ApiKeyContext,
     resolved: ResolvedChatRequest,
   ): Promise<void> {
     try {
@@ -225,8 +372,39 @@ export class ChatService {
         error: err instanceof Error ? err.message : 'unknown',
       });
     } finally {
+      await this.deps.credits?.release(
+        { userId: ctx.userId, unlimited: ctx.unlimited },
+        resolved.reservation,
+      );
+      await this.returnImages(resolved, ctx);
       await resolved.lease.release();
     }
+  }
+
+  /**
+   * Hands back image allowance claimed by a request that was never served.
+   *
+   * The images were not processed, so charging for them would be billing a
+   * failure. Best effort by design: the alternative is failing the customer's
+   * error handling over a counter that is already being released.
+   */
+  private async returnImages(resolved: ResolvedChatRequest, ctx: ApiKeyContext): Promise<void> {
+    if (resolved.claimedImages <= 0) return;
+    await this.deps.rateLimiter.releaseImageAllowance(ctx.userId, resolved.claimedImages);
+  }
+
+  /** Converts the reservation into real usage. Never throws; see CreditService. */
+  private async settleReservation(
+    ctx: ApiKeyContext,
+    resolved: ResolvedChatRequest,
+    usage: { totalTokens: number | null } | null,
+  ): Promise<void> {
+    if (!this.deps.credits) return;
+    await this.deps.credits.settle(
+      { userId: ctx.userId, unlimited: ctx.unlimited },
+      resolved.reservation,
+      usage,
+    );
   }
 
   /** Maps a provider throw into a client-safe HttpError. */
@@ -327,6 +505,11 @@ export class ChatService {
       // completions cannot lose an update and no read-modify-write lock is
       // needed around it.
       await this.deps.rateLimiter.recordTokens(this.limitInput(ctx), result.usage.totalTokens);
+      // Settled before the lease is released so the ordering in the database
+      // matches the order the customer experienced: tokens spent, then the
+      // concurrency slot freed. Settling is idempotent, so a duplicate call
+      // here costs nothing.
+      await this.settleReservation(ctx, resolved, result.usage);
       await resolved.lease.release();
 
       // The upstream echoes the id it was asked for. Rewrite it to the public
@@ -348,7 +531,7 @@ export class ChatService {
         signal.aborted ? 'cancelled' : 'error',
         record.latencyMs,
       );
-      await this.recordQuietly(record, resolved);
+      await this.recordQuietly(record, ctx, resolved);
       throw httpError;
     }
   }
@@ -451,11 +634,32 @@ export class ChatService {
       if (streamUsage?.totalTokens) {
         await this.deps.rateLimiter.recordTokens(this.limitInput(ctx), streamUsage.totalTokens);
       }
+      /**
+       * Only a completed stream is charged. A stream that errored or was cut
+       * short by a client disconnect releases its reservation instead, and a
+       * stream whose provider never sent a usage frame releases too — the
+       * customer was sent no billable output in either case.
+       */
+      if (outcome.status === 'success') {
+        await this.settleReservation(ctx, resolved, outcome.usage);
+      } else {
+        await this.deps.credits?.release(
+          { userId: ctx.userId, unlimited: ctx.unlimited },
+          resolved.reservation,
+        );
+      }
     } catch (err) {
       this.deps.logger.error('Failed to record stream outcome', {
         requestId: record.requestId,
         error: err instanceof Error ? err.message : 'unknown',
       });
+      // The catch above can swallow a failed settle, which would strand the
+      // reservation. Releasing on the way out guarantees the tokens come back
+      // even when the ledger write is what broke.
+      await this.deps.credits?.release(
+        { userId: ctx.userId, unlimited: ctx.unlimited },
+        resolved.reservation,
+      );
     } finally {
       await resolved.lease.release();
     }

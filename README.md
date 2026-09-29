@@ -22,6 +22,7 @@ data centre.
 - [Metrics](#metrics)
 - [Backups](#backups)
 - [Data retention](#data-retention)
+- [Credit management](#credit-management)
 - [API documentation](#api-documentation)
 - [API Playground](#api-playground)
 - [Testing](#testing)
@@ -301,6 +302,145 @@ RETENTION_ENABLED=true
 
 ---
 
+## Credit management
+
+Customers do not get an API key that draws on an unlimited upstream balance.
+Every account holds two separate token balances, and every request is charged
+against one of them before it is allowed to reach the provider.
+
+### The model
+
+| Piece | Where it lives | Notes |
+| --- | --- | --- |
+| `users.status` | `pending` / `active` / `suspended` / `rejected` | Approval gate. Enforced on the API path, not just hidden in the UI. |
+| `credit_balances` | free + paid, each with granted / used / reserved / remaining | Free and paid never mix, so a paying customer watches the promotion drain before their money. |
+| `credit_ledger` | append-only | Every grant, deduction, refund and manual adjustment, with the balance after each. |
+| `credit_reservations` | per in-flight request | A worst-case claim held for the life of a request. |
+| `payment_requests` | one row per submitted payment | Approved inside a transaction guarded on `status = 'pending'`. |
+| `credit_packages` | operator-configured | Name, credits, price, currency, sort order. |
+| `billing_settings` | singleton | Payment QR, instructions, method label, currency. |
+
+**Reservation is the interesting part.** A request cannot be charged a number
+nobody knows yet — the completion has not been written when the call starts. So
+before every request, the platform claims an upper bound atomically inside a
+transaction, calls the provider, and then settles at the provider's own reported
+count, returning the unused remainder immediately. That is what stops two
+concurrent requests each claiming 900 tokens against a 1,000 balance from both
+succeeding.
+
+The bound is `CREDIT_MAX_RESERVATION_TOKENS` (default 32,000), deliberately far
+below the provider's output cap. Taking the cap literally would mean only two
+concurrent unbounded requests fit inside a 500k trial, so ordinary customers
+would be told they were out of credits while demonstrably holding half a
+million of them.
+
+When a balance is too small for the full bound, the claim is **clamped to what
+is actually spendable** rather than refusing the request. A customer holding 500
+credits used to be shown "500 remaining" and then refused every call, including
+a two-word prompt that genuinely cost under 500; they are now served, charged
+the real amount, and never driven below zero. If even a minimal request cannot
+be covered, that is a genuine exhaustion and returns a structured 402.
+
+### Migrations
+
+`0004`–`0006` add the credit system. They are additive: existing accounts,
+projects, keys and `requests` rows are untouched, and every account starts with
+a zero balance.
+
+```bash
+pnpm run migrate
+```
+
+### Environment
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `APPROVAL_REQUIRED` | `true` | New signups are `pending` until approved. `false` grants the trial at signup instead. |
+| `FREE_TRIAL_TOKENS` | `500000` | The one-time trial. `0` disables it. |
+| `CREDIT_MAX_RESERVATION_TOKENS` | `32000` | Worst-case claim per request. |
+| `CREDIT_RESERVATION_SWEEP_INTERVAL_MS` | `60000` | How often reservations orphaned by a crash are reclaimed. |
+| `PAYMENT_MAX_UPLOAD_BYTES` | `5000000` | Cap on receipts and QR images, checked on the decoded bytes. |
+| `TELEGRAM_BOT_TOKEN` | — | Optional. Both Telegram values or neither. |
+| `TELEGRAM_CHAT_ID` | — | Destination chat. Negative for a group. |
+| `TELEGRAM_TIMEOUT_MS` | `5000` | Deliberately short: a notification is a side effect, never a gate. |
+| `ADMIN_EMAIL` | — | Address that becomes admin on signup, skipping the queue. |
+
+All are documented in `.env.example`.
+
+### Configuring the payment QR and packages
+
+Both live in **Admin → Credits**, and both are server-side state — nothing
+sensitive is in the frontend bundle.
+
+1. **Credits → Payment method.** Upload a PNG, JPEG or WebP QR, or paste an
+   `https` URL for one you host. Plain `http` is rejected: a QR fetched over it
+   can be swapped in transit and the customer scans the wrong destination. Data
+   uploads are decoded and their magic bytes checked before storage, so the
+   operator's own browser is never handed an arbitrary payload to render. Add
+   the payment method label, the instructions, and the default currency.
+2. **Credits → Packages.** Create the tiers you sell. Price and credit amounts
+   are read from the server when a payment is submitted — a client cannot name
+   its own price.
+
+The billing form sends only the fields you actually edited. Saving a QR upload
+does not clear your instructions.
+
+### Configuring Telegram
+
+Optional. Without it, payments are still recorded and the dashboard shows the
+notification as not sent, with a manual retry.
+
+1. Message **@BotFather**, send `/newbot`, copy the token.
+2. Message your new bot once so it has something to reply to.
+3. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` and read
+   `"chat":{"id":...}`. A group id is negative.
+4. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`, then restart.
+
+The token is read only by the server-side notifier. It is never in an API
+response, the dashboard bundle, or a log line, and a test asserts that. Delivery
+failure never loses the payment request and never grants credits.
+
+### The customer-to-admin workflow
+
+1. Customer registers → `status: pending`, **no** trial, API calls refused with
+   `invalid_api_key` (indistinguishable from a bad key, so nothing leaks about
+   which accounts exist).
+2. Admin finds them by name or email under **Credits → Customers** and clicks
+   **Approve & grant trial**. The account becomes active and exactly 500,000
+   free tokens land in the same transaction. A second click is a replay: the
+   response says `alreadyTrialed` and adds nothing.
+3. Customer uses the API. Charges settle at the provider's real token count.
+4. Balance reaches zero → `402 credit_exhausted` with the remaining balances in
+   the body, and the dashboard shows the paywall.
+5. Customer picks a package, confirms the email **on their own account** (a
+   mismatch is rejected — email alone is not proof of identity), pays by QR, and
+   submits the transaction reference and optionally a receipt. Status is
+   `pending`; the reference is unique, so a double submit is refused.
+6. Admin reviews the payment under **Credits → Payments**, sees the receipt, and
+   approves. The exact package credits land in the paid pool and API access
+   resumes. Approving again returns `replayed: true` and allocates nothing.
+7. Every step is in the ledger, and every admin action is in the audit log.
+
+Customers cannot approve themselves, cannot reach any admin route, and cannot
+read another customer's ledger — all enforced server-side and covered by tests.
+
+### Known limits
+
+- Credits are **tokens**, not money. There is no pricing per token, no partial
+  refund, and no proration; a package grants a flat credit count.
+- Settlement is capped at what a request reserved. If the provider reports more
+  than was held, the customer is under-charged by the difference. This is the
+  deliberate trade that keeps balances from going negative; the provider's real
+  count is always recorded in `requests` for reconciliation.
+- `ADMIN_PASSWORD` is **not read by any code path.** Password is always the one
+  chosen on the signup or password-change form. It remains in `.env.example` so
+  an existing deployment is not surprised by it doing nothing.
+- With `ADMIN_EMAIL` unset, the first account to register on a fresh instance
+  becomes admin. On a publicly reachable signup form that means whoever
+  registers first takes control, so set `ADMIN_EMAIL` before exposing the site.
+
+---
+
 ## API documentation
 
 - `/docs` — Swagger UI
@@ -360,7 +500,7 @@ letting a CORS failure look like a bad key.
 ```bash
 pnpm run typecheck
 pnpm run lint
-pnpm run test          # 277 tests
+pnpm run test          # 412 tests
 pnpm run build
 SERVE_DASHBOARD=true pnpm run check:start
 ```

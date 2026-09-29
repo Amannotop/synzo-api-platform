@@ -10,6 +10,7 @@ const NAV = [
   { to: '/projects', label: 'Projects', icon: Icons.folder },
   { to: '/models', label: 'Models', icon: Icons.cube },
   { to: '/usage', label: 'Usage', icon: Icons.chart },
+  { to: '/credits', label: 'Credits', icon: Icons.wallet },
   { to: '/requests', label: 'Requests', icon: Icons.list },
   { to: '/playground', label: 'Playground', icon: Icons.terminal },
   { to: '/documentation', label: 'Documentation', icon: Icons.book },
@@ -18,14 +19,17 @@ const NAV = [
 
 const ADMIN_NAV = [
   { to: '/admin', label: 'Admin', icon: Icons.shield },
+  { to: '/admin/credits', label: 'Credits & billing', icon: Icons.wallet },
   { to: '/operations', label: 'Operations', icon: Icons.chart },
 ];
 
 const TITLES: Record<string, string> = {
   '/': 'Dashboard', '/keys': 'API Keys', '/projects': 'Projects', '/models': 'Models',
-  '/usage': 'Usage', '/requests': 'Requests', '/documentation': 'Documentation',
+  '/usage': 'Usage', '/credits': 'Credits', '/requests': 'Requests',
+  '/documentation': 'Documentation',
   '/playground': 'Playground',
-  '/settings': 'Settings', '/admin': 'Admin', '/operations': 'Operations',
+  '/settings': 'Settings', '/admin': 'Admin', '/admin/credits': 'Credits & billing',
+  '/operations': 'Operations',
 };
 
 export default function AppLayout() {

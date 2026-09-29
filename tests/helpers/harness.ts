@@ -58,6 +58,17 @@ export interface Harness {
    * waiting on its timer or reaching into the process's private state.
    */
   retention: BuiltApp['retention'];
+  /** Credit accounting, for suites that exercise balances directly. */
+  credits: BuiltApp['credits'];
+  creditService: BuiltApp['creditService'];
+  /** The stale-reservation reclaim loop, drivable without waiting on a timer. */
+  creditSweeper: BuiltApp['creditSweeper'];
+  /**
+   * The payment notifier, so a suite can drive the delivery path against a
+   * stub instead of api.telegram.org. Its `fetchImpl` is a plain writable
+   * field for exactly this reason.
+   */
+  telegram: BuiltApp['telegram'];
   close: () => Promise<void>;
 }
 
@@ -65,6 +76,29 @@ export interface HarnessOptions {
   /** Point the provider at a local server instead of the live upstream. */
   localUpstream?: boolean;
   env?: Record<string, string>;
+  /**
+   * Opt into the credit system's production semantics: new registrations
+   * require admin approval, and a fresh account has NO credits.
+   *
+   * Off by default so the suites that predate credits (rate limiting, tool
+   * calling, metrics, usage) keep testing what they were written to test
+   * rather than tripping over a 402 they have no reason to expect. A suite
+   * that is ABOUT the credit system turns this on, because "a new account
+   * cannot use the API" is exactly the behaviour it needs to verify.
+   */
+  creditSystem?: boolean;
+  /**
+   * Opt into plan entitlements: a trial grants only the entry package's models
+   * instead of every model.
+   *
+   * Deliberately separate from `creditSystem`, because the two are different
+   * subjects. A suite about credit accounting still needs to address models by
+   * name — `max`, `high` — and expect them to work; making it also opt into
+   * model tiers would fail every one of those calls with a 404 that is correct
+   * but unrelated to what the suite is testing. So `creditSystem` governs
+   * approval and balances, and this governs which models a trial can reach.
+   */
+  planEntitlements?: boolean;
 }
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -79,6 +113,25 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     // Point every service at the local stub so nothing reaches the internet.
     UPSTREAM_BASE_URL: upstream.baseUrl,
     UPSTREAM_API_KEY: '',
+    /**
+     * Legacy suites register an account and immediately make an API call. With
+     * credit enforcement wired in (which is unconditional in `buildApp`, and
+     * should be), that account has a zero balance and the call is correctly
+     * refused with a 402. Turning the switch off is the honest way to keep
+     * those suites testing their own subject; every one of them can instead
+     * opt in and assert the credit behaviour explicitly.
+     */
+    APPROVAL_REQUIRED: options.creditSystem ? 'true' : 'false',
+    /**
+     * Legacy suites address models by name (`max`, `high`) and expect them to
+     * work. The trial tier only grants the entry package's models, so with real
+     * plan semantics every one of those calls would be refused with a 404 —
+     * correctly, and for a reason that has nothing to do with what those suites
+     * are testing. The trial is therefore unrestricted here, the same way
+     * APPROVAL_REQUIRED is turned off above. A suite that IS about plan
+     * entitlements passes `planEntitlements: true` and gets the real behaviour.
+     */
+    FREE_TRIAL_PACKAGE: options.planEntitlements ? '' : 'none',
     ...options.env,
   };
 
@@ -99,6 +152,10 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     upstream,
     config,
     retention: built.retention,
+    credits: built.credits,
+    creditService: built.creditService,
+    creditSweeper: built.creditSweeper,
+    telegram: built.telegram,
     close: async () => {
       await built.app.close();
       await handle.close();

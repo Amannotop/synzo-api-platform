@@ -16,6 +16,17 @@ export interface ApiKeyContext {
     tokensPerDay: number;
     maxConcurrentRequests: number;
     allowedModels: string | null;
+    /**
+     * Images this customer may attach per request. `null` means unlimited at
+     * the plan level, and is still subject to the platform ceiling enforced by
+     * the request schema.
+     */
+    maxImages: number | null;
+    /**
+     * When the plan lapses, carried so the image counter can be given exactly
+     * that lifetime rather than outliving the subscription it belongs to.
+     */
+    planExpiresAt: Date | null;
   };
   unlimited: boolean;
   allowLiveKeys: boolean;
@@ -67,6 +78,20 @@ export function createApiKeyAuth(config: AppConfig, keys: ApiKeyRepository, user
     const user = await users.findById(found.userId);
     if (!user || user.status !== 'active') throw invalidApiKey();
 
+    /**
+     * A paid plan that has run out serves the base grant instead of the paid
+     * one, resolved here rather than by a background sweep so a 7-day tier stops
+     * on the 7th day rather than up to a day later.
+     *
+     * The paid values stay on the row, so a renewal restores access and the
+     * customer does not re-purchase anything.
+     */
+    const planExpired =
+      limits.planExpiresAt !== null && limits.planExpiresAt.getTime() <= Date.now();
+    const effective = planExpired
+      ? { allowedModels: limits.baseAllowedModels, maxImages: limits.baseMaxImages }
+      : { allowedModels: limits.allowedModels, maxImages: limits.maxImages };
+
     request.apiKey = {
       keyId: found.keyId,
       userId: found.userId,
@@ -77,7 +102,9 @@ export function createApiKeyAuth(config: AppConfig, keys: ApiKeyRepository, user
         requestsPerDay: limits.requestsPerDay,
         tokensPerDay: limits.tokensPerDay,
         maxConcurrentRequests: limits.maxConcurrentRequests,
-        allowedModels: limits.allowedModels,
+        allowedModels: effective.allowedModels,
+        maxImages: effective.maxImages,
+        planExpiresAt: limits.planExpiresAt,
       },
       unlimited: user.unlimitedMode,
       allowLiveKeys: user.allowLiveKeys,

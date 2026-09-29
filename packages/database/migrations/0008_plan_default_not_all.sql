@@ -1,0 +1,32 @@
+-- Distinguish "never granted a plan" from "granted every model".
+--
+-- ----
+-- The problem:
+--
+-- `customer_limits.allowed_models` is nullable, and NULL has been doing two
+-- jobs. For a customer who has bought the top tier it correctly means "every
+-- model". For a brand-new account it means the opposite: nothing was ever
+-- granted, and the column simply holds its null default.
+--
+-- `unionAllowedModels` resolves that ambiguity in favour of "already has
+-- everything", which is right when access accumulates over time and wrong for
+-- the first grant. Applied at activation, it meant the tier never landed at
+-- all: every newly approved customer kept all six models, because their
+-- starting NULL absorbed the entry package's two. Verified against the running
+-- instance, where accounts holding a 500,000-token trial grant still had
+-- `allowed_models IS NULL`.
+--
+-- ----
+-- The fix is to make the default say what it means.
+--
+-- A new account has been granted nothing, so its row is written as an empty
+-- JSON array — a state the parser already distinguishes from NULL, and which
+-- `parseAllowedModels` has always returned as "no models". NULL is then only
+-- ever written by something that deliberately granted every model, which is
+-- what a NULL was always meant to say.
+--
+-- Only the DEFAULT changes. Existing rows are untouched, so every account
+-- keeps exactly the access it has today: NULL still means all models for them,
+-- and no paying or trialling customer loses a model because of this migration.
+ALTER TABLE customer_limits
+  ALTER COLUMN allowed_models SET DEFAULT '[]'::text;

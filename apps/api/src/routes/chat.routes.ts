@@ -37,6 +37,8 @@ export async function registerChatRoutes(app: FastifyInstance, deps: ChatDeps): 
     maxMessages: deps.config.limits.maxMessages,
     maxMessageChars: deps.config.limits.maxMessageChars,
     maxContentTokensHardCap: deps.config.limits.maxContentTokensHardCap,
+    maxImagesPerRequest: deps.config.limits.maxImagesPerRequest,
+    maxImageBytes: deps.config.limits.maxImageBytes,
   });
   const auth = createApiKeyAuth(deps.config, deps.apiKeys, deps.users);
 

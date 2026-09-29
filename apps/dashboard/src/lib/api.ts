@@ -1,9 +1,18 @@
 import type {
+  AdminCreditCustomer,
+  AdminCustomerList,
+  AdminPaymentRow,
   ApiKey,
+  BillingSettings,
+  CreditBalance,
+  CreditPackage,
+  CreditsOverview,
+  LedgerEntry,
   Limits,
   MetricsSummary,
   Model,
   Overview,
+  PaymentRequest,
   Project,
   Provider,
   ProviderHealthEntry,
@@ -177,5 +186,108 @@ export const api = {
     errors: () => request<{ errors: unknown[] }>('/api/admin/errors'),
     providerHealth: () => request<{ health: unknown[] }>('/api/admin/providers/health'),
     audit: () => request<{ entries: unknown[] }>('/api/admin/audit'),
+  },
+
+  /**
+   * The customer's whole credit position in one document: account status,
+   * both pools, the packages on offer, the payment configuration and recent
+   * payment history. The dashboard needs them together so the panels cannot
+   * disagree with each other mid-render.
+   */
+  credits: () => request<CreditsOverview>('/api/credits'),
+  creditLedger: (limit = 50) => request<{ entries: LedgerEntry[] }>(`/api/credits/ledger?limit=${limit}`),
+
+  /**
+   * Submits a payment claim. Deliberately sends only what the SERVER cannot
+   * derive: which package, the transaction reference, the confirmed email, and
+   * an optional receipt. Price and credit count are never sent, because a
+   * client-sent amount would be a client-chosen amount.
+   */
+  submitPayment: (input: {
+    packageId: string;
+    reference: string;
+    confirmedEmail: string;
+    receiptDataUrl?: string;
+  }) => post<{ payment: PaymentRequest; message: string }>('/api/credits/payments', input),
+
+  adminCredits: {
+    /**
+     * `q` is sent to the server, not filtered in the browser. An operator
+     * looking for a Gmail address needs to find the account whether it is
+     * row 3 or row 300, and client-side filtering of one page can only ever
+     * search the page it already has.
+     */
+    customers: (params: { limit?: number; offset?: number; q?: string } = {}) => {
+      const q = new URLSearchParams();
+      if (params.limit !== undefined) q.set('limit', String(params.limit));
+      if (params.offset !== undefined) q.set('offset', String(params.offset));
+      if (params.q) q.set('q', params.q);
+      const qs = q.toString();
+      return request<AdminCustomerList>(
+        `/api/admin/credits/customers${qs ? `?${qs}` : ''}`,
+      );
+    },
+    customer: (id: string) =>
+      request<{
+        customer: AdminCreditCustomer & { unlimitedMode: boolean };
+        balance: CreditBalance;
+        ledger: LedgerEntry[];
+        payments: PaymentRequest[];
+      }>(`/api/admin/credits/customers/${id}`),
+    approve: (id: string, note?: string) =>
+      post<{
+        customer: { id: string; status: string };
+        balance: CreditBalance;
+        alreadyApproved: boolean;
+        alreadyTrialed: boolean;
+        trialTokens: number;
+      }>(`/api/admin/credits/customers/${id}/approve`, note ? { note } : {}),
+    reject: (id: string, note?: string) =>
+      post<{ customer: { id: string; status: string } }>(`/api/admin/credits/customers/${id}/reject`, note ? { note } : {}),
+    setStatus: (id: string, status: 'active' | 'suspended') =>
+      post<{ customer: { id: string; status: string } }>(`/api/admin/credits/customers/${id}/status`, { status }),
+    adjust: (id: string, input: { bucket: 'free' | 'paid'; direction: 'add' | 'deduct'; amount: number; reason: string }) =>
+      post<{ balance: CreditBalance; ledgerEntry: LedgerEntry }>(
+        `/api/admin/credits/customers/${id}/adjust`,
+        input,
+      ),
+    packages: () => request<{ packages: CreditPackage[] }>('/api/admin/credits/packages'),
+    createPackage: (input: { name: string; description?: string | null; credits: number; priceMinor: number; currency?: string; sortOrder?: number; active?: boolean }) =>
+      post<{ package: CreditPackage }>('/api/admin/credits/packages', input),
+    updatePackage: (id: string, input: Partial<Pick<CreditPackage, 'name' | 'description' | 'credits' | 'priceMinor' | 'currency' | 'sortOrder' | 'active'>>) =>
+      request<{ package: CreditPackage }>(`/api/admin/credits/packages/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(input),
+      }),
+    billing: () => request<{ billing: BillingSettings | null }>('/api/admin/credits/billing'),
+    updateBilling: (input: {
+      paymentInstructions?: string | null;
+      paymentMethodLabel?: string | null;
+      currency?: string;
+      qrCodeUrl?: string | null;
+    }) =>
+      request<{ billing: BillingSettings }>('/api/admin/credits/billing', {
+        method: 'PATCH',
+        body: JSON.stringify(input),
+      }),
+    payments: (status?: string) =>
+      request<{ payments: AdminPaymentRow[] }>(
+        `/api/admin/credits/payments${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+      ),
+    approvePayment: (id: string, note?: string) =>
+      post<{ payment: PaymentRequest; balance: CreditBalance; replayed: boolean }>(
+        `/api/admin/credits/payments/${id}/approve`,
+        note ? { note } : {},
+      ),
+    rejectPayment: (id: string, note: string) =>
+      post<{ payment: PaymentRequest }>(`/api/admin/credits/payments/${id}/reject`, { note }),
+    retryTelegram: (id: string) =>
+      post<{ sent: boolean; error: string | null }>(`/api/admin/credits/payments/${id}/telegram-retry`, {}),
+    /**
+     * The receipt is an IMAGE, not JSON, so it cannot go through the JSON
+     * helper above. It is fetched as a blob and handed to an object URL, and
+     * the caller revokes that URL when done.
+     */
+    receiptUrl: (id: string) => `/api/admin/credits/payments/${id}/receipt`,
   },
 };

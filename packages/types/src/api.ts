@@ -5,6 +5,16 @@ export interface ApiErrorBody {
     type: ApiErrorType;
     code: string;
     param?: string | null;
+    /**
+     * Present only on `credit_exhausted`.
+     *
+     * Carrying the spendable balances on the rejection itself means a client
+     * can render its paywall from the error it already has, and the numbers it
+     * shows come from the same transaction that refused the request rather than
+     * from a follow-up read that may already be stale.
+     */
+    freeRemaining?: number;
+    paidRemaining?: number;
   };
 }
 

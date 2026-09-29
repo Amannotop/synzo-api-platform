@@ -13,6 +13,19 @@ export interface SessionUser {
   sessionId: string;
   unlimitedMode: boolean;
   allowLiveKeys: boolean;
+  /**
+   * The account's approval state.
+   *
+   * Carried on the session because a PENDING or REJECTED customer has to be
+   * able to sign in — they need somewhere to read why they cannot use the API
+   * and to reach the paywall. Blocking them at sign-in would leave an
+   * applicant with no way to learn anything, and the spec requires the status
+   * to be VISIBLE in the customer dashboard.
+   *
+   * The gate that matters is therefore NOT here: it is in the API-key path,
+   * which is the only thing that can actually spend credits.
+   */
+  status: string;
 }
 
 declare module 'fastify' {
@@ -88,6 +101,7 @@ export function createSessionResolver(sessions: SessionRepository, cookieName: s
       sessionId: resolved.sessionId,
       unlimitedMode: resolved.unlimitedMode,
       allowLiveKeys: resolved.allowLiveKeys,
+      status: resolved.status,
     };
   };
 }
@@ -96,6 +110,22 @@ export function createSessionResolver(sessions: SessionRepository, cookieName: s
 export function requireSession(request: FastifyRequest): SessionUser {
   if (!request.sessionUser) throw unauthorized();
   return request.sessionUser;
+}
+
+/**
+ * Requires a signed-in account that is not suspended.
+ *
+ * 'pending' and 'rejected' are allowed through: both are states a customer is
+ * expected to SEE and act on (read their balance, buy credits, read why they
+ * are blocked), and the routes that must be closed to them are closed by their
+ * own handlers. 'suspended' is not, because suspending an existing working
+ * account is a deliberate operator action and the whole point of it is that the
+ * account stops working immediately.
+ */
+export function requireActiveAccount(request: FastifyRequest): SessionUser {
+  const user = requireSession(request);
+  if (user.status === 'suspended') throw forbidden();
+  return user;
 }
 
 /** Rejects the request unless the caller is an admin (§24). */

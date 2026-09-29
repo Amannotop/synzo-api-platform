@@ -87,6 +87,19 @@ const envSchema = z.object({
   MAX_MESSAGES: intFromEnv(1, 10_000).default(200),
   MAX_MESSAGE_CHARS: intFromEnv(1, 10_000_000).default(100_000),
   MAX_CONTENT_TOKENS_HARD_CAP: intFromEnv(1, 1_000_000).default(200_000),
+  // Image input. Counted per request across every message, and measured on the
+  // DECODED bytes of a data: URL rather than the base64 text, because that is
+  // the number that reaches the provider and the one the body limit is really
+  // protecting. A remote https URL is bounded by the body limit instead.
+  //
+  // This is the PLATFORM ceiling, not an entitlement: a customer's plan may cap
+  // them lower (`customer_limits.max_images`). It has to sit high enough that
+  // the top tier's "unlimited images" is reachable in practice, so it is well
+  // above any tier limit. In practice MAX_REQUEST_BODY_BYTES is what really
+  // binds first — at the default 1MB body only about 20 base64 images fit — so
+  // raise both together if you need genuinely large batches.
+  MAX_IMAGES_PER_REQUEST: intFromEnv(0, 200).default(64),
+  MAX_IMAGE_BYTES: intFromEnv(1024, 50_000_000).default(5_000_000),
 
   // Security
   API_KEY_PEPPER: z.string().min(32, 'API_KEY_PEPPER must be at least 32 characters'),
@@ -175,6 +188,108 @@ const envSchema = z.object({
   MAIL_TRANSPORT: z.enum(['smtp', 'log']).default('log'),
   MAIL_FROM: z.string().default('Synzo <no-reply@synzo.local>'),
   SMTP_URL: optionalSecret,
+
+  // --- Credit management ---------------------------------------------------
+  /**
+   * When true, a newly registered account is created as 'pending' and cannot
+   * use the API until an admin approves it.
+   *
+   * ON by default, because the specified product requires it: an account that
+   * can spend the operator's upstream credits the moment somebody types an
+   * email address is not a customer, it is an open relay. The founding admin
+   * is exempt (see UserRepository.create), so switching this on cannot lock the
+   * operator out of their own platform.
+   *
+   * Turning it OFF does not grant anything: it only means new accounts skip
+   * the approval queue. They still start with a zero balance, so they still
+   * cannot make an API call until credits are granted. That separation is
+   * deliberate — "approved" and "has credits" are different questions, and
+   * conflating them is what would let an unvouched-for account spend money.
+   */
+  APPROVAL_REQUIRED: boolFromString.default('true'),
+
+  /**
+   * Size of the one-time free trial, in token credits. The spec asks for
+   * 500,000; configurable so an operator can run a promotion without a
+   * migration. 0 disables the trial entirely (approval then grants nothing).
+   */
+  FREE_TRIAL_TOKENS: intFromEnv(0, 100_000_000_000).default(500_000),
+
+  /**
+   * Which package's model access a newly approved account receives.
+   *
+   * Empty (the default) means the cheapest active package, so the trial is the
+   * entry plan and the operator controls it by how they price the packages.
+   *
+   * `none` applies no model restriction at all, which is the escape hatch for a
+   * deployment that wants the trial unrestricted. It is deliberately a word
+   * rather than an empty value, because an empty value already means "derive
+   * it" and the two must not collapse into each other.
+   */
+  FREE_TRIAL_PACKAGE: z.enum(['', 'none']).default(''),
+
+  /**
+   * Largest payment receipt or QR upload accepted, in bytes.
+   *
+   * Enforced twice: the schema caps the data URL string, and the route decodes
+   * it and re-checks the decoded length, because a client can lie about the
+   * length of a string it sent. 5MB is comfortably above a phone screenshot
+   * and far below anything that would stall a request.
+   */
+  PAYMENT_MAX_UPLOAD_BYTES: intFromEnv(1024, 20_000_000).default(5_000_000),
+
+  /**
+   * The largest worst-case reservation a single request may take.
+   *
+   * A reservation is an UPPER BOUND on what the request can cost, so the safe
+   * value is the provider's own output cap — but taking that literally makes
+   * the platform unusable. With the default 200k cap and a 500k trial, only
+   * two concurrent unbounded requests fit inside the whole balance, so an
+   * ordinary customer would be told "out of credits" while demonstrably
+   * holding half a million of them.
+   *
+   * This cap trades a little accounting precision for a working product. A
+   * request whose REAL usage exceeds its reservation is charged up to what it
+   * held and the discrepancy is logged; the provider's own count is always
+   * recorded in `requests`, so an operator can reconcile. Under-charging a
+   * misbehaving upstream is strictly better than refusing service to a paying
+   * customer, and the alternative — driving a balance negative — is what the
+   * reservation mechanism exists to prevent.
+   *
+   * Raise it to MAX_CONTENT_TOKENS_HARD_CAP for exact accounting, at the cost
+   * of admitting far fewer concurrent requests per balance.
+   */
+  CREDIT_MAX_RESERVATION_TOKENS: intFromEnv(1_000, 1_000_000).default(32_000),
+
+  /**
+   * How often orphaned credit reservations are reclaimed.
+   *
+   * A reservation left unsettled by a crash freezes the tokens it held. This
+   * is the recovery interval for that. Defaults to a quarter of the staleness
+   * window, so a lost reservation is returned reasonably promptly while a
+   * live one is never at risk: the sweeper only touches claims older than the
+   * window, and the interval is just how often it looks.
+   *
+   * 0 disables the sweeper entirely, which is only appropriate when something
+   * else is calling the sweep.
+   */
+  CREDIT_RESERVATION_SWEEP_INTERVAL_MS: intFromEnv(0, 86_400_000).default(60_000),
+
+  // --- Telegram payment notifications -------------------------------------
+  /**
+   * Bot token from @BotFather. NEVER sent to a client: it is read only by the
+   * server-side notifier, and nothing in the dashboard bundle references it.
+   */
+  TELEGRAM_BOT_TOKEN: optionalSecret,
+  /** Destination chat id. A user or channel id, both negative or both not. */
+  TELEGRAM_CHAT_ID: optionalSecret,
+  /**
+   * How long to wait on the Telegram API before giving up. Short on purpose:
+   * a notification is a side effect of a payment submission, and the customer
+   * must not be held waiting on a third party to learn their request was
+   * recorded.
+   */
+  TELEGRAM_TIMEOUT_MS: intFromEnv(500, 30_000).default(5_000),
 });
 
 /**
@@ -519,7 +634,14 @@ export interface AppConfig {
   };
   defaultModel: string;
   defaults: { requestsPerMinute: number; requestsPerDay: number; tokensPerDay: number; maxConcurrentRequests: number };
-  limits: { maxBodyBytes: number; maxMessages: number; maxMessageChars: number; maxContentTokensHardCap: number };
+  limits: {
+    maxBodyBytes: number;
+    maxMessages: number;
+    maxMessageChars: number;
+    maxContentTokensHardCap: number;
+    maxImagesPerRequest: number;
+    maxImageBytes: number;
+  };
   security: {
     apiKeyPepper: string;
     sessionSecret: string;
@@ -546,6 +668,42 @@ export interface AppConfig {
   serving: { dashboard: boolean; dashboardDist: string };
   metrics: { enabled: boolean; token: string | undefined };
   retention: { enabled: boolean; requestDays: number; intervalMs: number };
+  credits: {
+    /**
+     * Whether new registrations require admin approval before API access.
+     */
+    approvalRequired: boolean;
+    /** One-time free trial size, in token credits. 0 disables it. */
+    freeTrialTokens: number;
+    /**
+     * The package whose model access a trial grants: a name, or null to derive
+     * the cheapest active one. `false` means the operator asked for no model
+     * restriction on a trial at all (FREE_TRIAL_PACKAGE=none).
+     */
+    entryPackage: string | null | false;
+    /** Largest accepted payment receipt upload, in bytes. */
+    maxPaymentUploadBytes: number;
+    /**
+     * How often orphaned credit reservations are reclaimed. 0 disables the
+     * sweeper, for a deployment that recovers them some other way.
+     */
+    reservationSweepIntervalMs: number;
+    /** Ceiling on one request's worst-case reservation. */
+    maxReservationTokens: number;
+  };
+  /**
+   * Telegram notification settings.
+   *
+   * `configured` is the single flag the rest of the code branches on, because
+   * "token set but no chat id" must behave exactly like "neither set": a
+   * half-configured bot would otherwise throw on every payment.
+   */
+  telegram: {
+    botToken: string | undefined;
+    chatId: string | undefined;
+    timeoutMs: number;
+    configured: boolean;
+  };
 }
 
 
@@ -648,6 +806,8 @@ export function buildConfig(env: Env): AppConfig {
       maxMessages: env.MAX_MESSAGES,
       maxMessageChars: env.MAX_MESSAGE_CHARS,
       maxContentTokensHardCap: env.MAX_CONTENT_TOKENS_HARD_CAP,
+      maxImagesPerRequest: env.MAX_IMAGES_PER_REQUEST,
+      maxImageBytes: env.MAX_IMAGE_BYTES,
     },
     security: {
       apiKeyPepper: env.API_KEY_PEPPER,
@@ -719,6 +879,22 @@ export function buildConfig(env: Env): AppConfig {
       enabled: env.RETENTION_ENABLED,
       requestDays: env.REQUEST_RETENTION_DAYS,
       intervalMs: env.RETENTION_INTERVAL_MS,
+    },
+    credits: {
+      approvalRequired: env.APPROVAL_REQUIRED,
+      freeTrialTokens: env.FREE_TRIAL_TOKENS,
+      entryPackage: env.FREE_TRIAL_PACKAGE === 'none' ? false : env.FREE_TRIAL_PACKAGE || null,
+      maxPaymentUploadBytes: env.PAYMENT_MAX_UPLOAD_BYTES,
+      reservationSweepIntervalMs: env.CREDIT_RESERVATION_SWEEP_INTERVAL_MS,
+      maxReservationTokens: env.CREDIT_MAX_RESERVATION_TOKENS,
+    },
+    telegram: {
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      chatId: env.TELEGRAM_CHAT_ID,
+      timeoutMs: env.TELEGRAM_TIMEOUT_MS,
+      // Both halves or neither. A token with no chat id is a misconfiguration
+      // that would otherwise fail on every single payment submission.
+      configured: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID),
     },
   };
 }

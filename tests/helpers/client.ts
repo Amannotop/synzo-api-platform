@@ -83,3 +83,47 @@ export function uniqueEmail(prefix = 'itest'): string {
 }
 
 export const TEST_PASSWORD = 'integration-test-password';
+
+/**
+ * Approves an account and grants it credits, as the admin flow does.
+ *
+ * A customer that has never been approved holds a zero balance, so any suite
+ * that wants to make an API call has to get past the credit gate first. Doing
+ * that through the real admin endpoints rather than by writing to the database
+ * keeps the tests honest: they exercise the same approval path production uses,
+ * so a break in that path fails the suite instead of being papered over.
+ *
+ * `trialTokens` is passed explicitly because the size of the free trial is
+ * configuration, and a test asserting "exactly 500,000" should not silently
+ * follow whatever the local `.env` happens to say.
+ */
+export async function approveWithCredits(
+  h: { app: FastifyInstance; credits: { grant: (input: {
+    userId: string;
+    bucket: 'free' | 'paid';
+    kind: 'free_trial_grant' | 'admin_grant' | 'payment_credit' | 'reversal';
+    amount: number;
+    reason: string;
+    actorUserId: string | null;
+  }) => Promise<unknown> } },
+  admin: Client,
+  customer: Client,
+  customerId: string,
+  amount: number,
+  bucket: 'free' | 'paid' = 'paid',
+): Promise<void> {
+  const res = await admin.post(`/api/admin/credits/customers/${customerId}/approve`, { note: 'test' });
+  if (res.statusCode !== 200) {
+    throw new Error(`approve failed: ${res.statusCode} ${res.body}`);
+  }
+  if (amount <= 0) return;
+  const adjust = await admin.post(`/api/admin/credits/customers/${customerId}/adjust`, {
+    bucket,
+    direction: 'add',
+    amount,
+    reason: 'test funding',
+  });
+  if (adjust.statusCode !== 200) {
+    throw new Error(`fund failed: ${adjust.statusCode} ${adjust.body}`);
+  }
+}

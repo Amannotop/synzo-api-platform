@@ -559,3 +559,114 @@ tbody tr:hover { background: var(--surface-2); }
   font-family: var(--mono); font-size: 0.76rem; line-height: 1.6;
   margin: 0; max-height: 260px; white-space: pre-wrap; word-break: break-word;
 }
+
+/* ================================================== credits & billing ===
+   Added with the credit-management surface. Several of these are shared with
+   Operations, which had been asking for grid-3/grid-4 since it was written and
+   silently falling back to a single column because the rules did not exist. */
+
+/* Package cards collapse to one column on a phone so the price and the call
+   to action stay stacked in the order they are read. */
+@media (min-width: 900px) { .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 700px) { .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1100px) { .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+
+.package-card {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 16px;
+  border: 1px solid var(--border);
+}
+.package-card h3 { margin: 0; font-size: 0.98rem; }
+.package-card p { margin: 0; }
+/* The credit count and the price are the two numbers a customer actually
+   compares, so they get the visual weight and the tabular figures. */
+.package-credits {
+  font-size: 1.75rem; font-weight: 650; letter-spacing: -0.02em; margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.package-price {
+  font-size: 1.05rem; font-weight: 600; color: var(--accent);
+  margin: 6px 0 12px; font-variant-numeric: tabular-nums;
+}
+/* Every tier sells the same volume, so this is a shared line rather than a
+   differentiator. Styled as a quiet, positive tick so the eye moves straight on
+   to the thing that actually differs: which models, and images. */
+.package-volume {
+  display: flex; align-items: center; gap: 7px;
+  margin: 10px 0 2px;
+  font-size: 0.82rem; font-weight: 600; color: var(--success);
+}
+.package-volume-tick {
+  display: grid; place-items: center;
+  width: 17px; height: 17px; flex: 0 0 auto;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  font-size: 0.66rem; line-height: 1;
+}
+
+/* The per-tier spec line: how many images, for how long. A plain muted line
+   rather than a chip, because it now appears on every card and a chip repeated
+   three times reads as decoration instead of a difference. */
+.package-feature {
+  margin: 0 0 4px;
+  font-size: 0.8rem; font-weight: 600; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.package-term {
+  display: block;
+  font-size: 0.78rem; font-weight: 500; color: var(--text-subtle);
+  margin-top: 2px;
+}
+.package-card .btn { margin-top: auto; justify-content: center; }
+
+/* The QR is centred on every theme and given a light plate, because most
+   payment QR codes are dark-on-light and would otherwise be unreadable
+   rendered on a dark card. */
+.qr-block {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 14px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface-2);
+}
+.qr-block img {
+  background: #fff; padding: 8px; border-radius: var(--radius-sm);
+  max-width: 100%; height: auto; object-fit: contain;
+}
+.qr-placeholder {
+  width: 170px; height: 170px; display: grid; place-items: center;
+  background: var(--surface); border: 1px dashed var(--border);
+  border-radius: var(--radius-sm); color: var(--text-subtle); font-size: 0.82rem;
+}
+
+.instructions {
+  white-space: pre-wrap; background: var(--surface-2);
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm); padding: 12px 14px;
+  font-size: 0.85rem; color: var(--text-muted);
+}
+
+.nowrap { white-space: nowrap; }
+.pos { color: var(--success); }
+.neg { color: var(--danger); }
+
+/* Search sits in a card header, so it has to collapse before the header does
+   rather than pushing the card's title onto its own line on a phone. */
+.search-box {
+  display: flex; align-items: center; gap: 7px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 0 10px;
+  color: var(--text-subtle); min-width: 0; max-width: 320px; width: 100%;
+}
+.search-box:focus-within { border-color: var(--accent); }
+.search-box input {
+  background: none; border: 0; outline: none; color: var(--text);
+  padding: 8px 0; font-size: 0.85rem; width: 100%; min-width: 0;
+}
+
+@media (max-width: 560px) {
+  .search-box { max-width: none; }
+  /* Tabs scroll horizontally rather than wrapping into a tall stack, which is
+     what pushed the first row of content below the fold on a phone. */
+  .tabs { overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { flex: 0 0 auto; }
+}

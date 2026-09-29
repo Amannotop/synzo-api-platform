@@ -40,7 +40,17 @@ export class SessionRepository {
 
     const row = rows[0];
     if (!row) return null;
-    if (row.status !== 'active') return null;
+    /**
+     * Suspended accounts lose their session immediately, so an operator's
+     * suspension takes effect without waiting for a cookie to expire.
+     *
+     * Pending and rejected are NOT filtered out here. Both are states the
+     * customer has to be able to read: the spec requires the approval status to
+     * be visible in their dashboard and the paywall to be reachable, and
+     * refusing the session would make an applicant unable to see anything at
+     * all. The real gate on spending credits is the API-key path.
+     */
+    if (row.status === 'suspended') return null;
     return row;
   }
 

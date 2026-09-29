@@ -145,16 +145,50 @@ const schemas: Record<string, unknown> = {
     },
   },
 
+  ChatContentPart: {
+    type: 'object',
+    required: ['type'],
+    properties: {
+      type: { type: 'string', enum: ['text', 'image_url'] },
+      text: { type: 'string', description: 'Present when `type` is `text`.' },
+      image_url: {
+        type: 'object',
+        required: ['url'],
+        description:
+          'Present when `type` is `image_url`. Requires a plan that includes ' +
+          'image support; without one the request is refused with ' +
+          '`image_support_required`.',
+        properties: {
+          url: {
+            type: 'string',
+            description:
+              'A base64 `data:` URL, or an `https://` URL. Plain http is refused: ' +
+              'a URL swapped in transit would show the model something the caller ' +
+              'never chose. Only `image/png`, `image/jpeg` and `image/webp` are ' +
+              'accepted as a data: URL.',
+          },
+          detail: { type: 'string', enum: ['auto', 'low', 'high'], default: 'auto' },
+        },
+      },
+    },
+  },
+
   ChatMessage: {
     type: 'object',
     required: ['role'],
     properties: {
       role: { type: 'string', enum: ['system', 'user', 'assistant', 'tool'] },
       content: {
-        type: ['string', 'null'],
+        oneOf: [
+          { type: 'string' },
+          { type: 'null' },
+          { type: 'array', items: { $ref: '#/components/schemas/ChatContentPart' } },
+        ],
         description:
           'Null on an assistant turn that only requests tool calls, which is what ' +
-          'OpenAI clients send and expect back.',
+          'OpenAI clients send and expect back. An array of parts is only ever ' +
+          'needed when the message carries an image; a text-only client keeps ' +
+          'sending a bare string.',
       },
       name: { type: 'string' },
       tool_call_id: {
@@ -303,6 +337,98 @@ const schemas: Record<string, unknown> = {
       latencyMs: { type: ['integer', 'null'] },
       checkedAt: { type: 'string', format: 'date-time' },
       detail: { type: ['string', 'null'] },
+    },
+  },
+
+  CreditBalance: {
+    type: 'object',
+    description:
+      'Free and paid credits are tracked as two separate pools and are never ' +
+      'merged. `*Remaining` is spendable now; `*Reserved` is held by requests ' +
+      'currently in flight and is released when they settle.',
+    properties: {
+      freeGranted: { type: 'integer', description: 'Free tokens ever granted. Equals the trial.' },
+      freeUsed: { type: 'integer' },
+      freeRemaining: { type: 'integer' },
+      freeReserved: { type: 'integer' },
+      paidGranted: { type: 'integer' },
+      paidUsed: { type: 'integer' },
+      paidRemaining: { type: 'integer' },
+      paidReserved: { type: 'integer' },
+      totalRemaining: { type: 'integer' },
+      freeTrialGrantedAt: { type: ['string', 'null'], format: 'date-time' },
+      hasFreeTrial: { type: 'boolean', description: 'False until the one-time trial is granted.' },
+    },
+  },
+
+  CreditPackage: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      name: { type: 'string' },
+      description: { type: ['string', 'null'] },
+      credits: { type: 'integer', description: 'Token credits added when this package is approved.' },
+      priceMinor: {
+        type: 'integer',
+        description: 'Price in minor units, so money stays integral. 89900 is 899.00.',
+      },
+      currency: { type: 'string' },
+      sortOrder: { type: 'integer' },
+      active: { type: 'boolean' },
+    },
+  },
+
+  PaymentRequest: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      packageId: { type: ['string', 'null'], format: 'uuid' },
+      packageName: { type: 'string' },
+      credits: { type: 'integer' },
+      amountMinor: { type: 'integer' },
+      currency: { type: 'string' },
+      reference: { type: 'string', description: 'The transaction reference the customer supplied.' },
+      email: { type: 'string', format: 'email' },
+      status: { type: 'string', enum: ['pending', 'approved', 'rejected'] },
+      reviewNote: { type: ['string', 'null'] },
+      hasReceipt: { type: 'boolean' },
+      createdAt: { type: 'string', format: 'date-time' },
+      reviewedAt: { type: ['string', 'null'], format: 'date-time' },
+      telegramStatus: { type: ['string', 'null'] },
+    },
+  },
+
+  LedgerEntry: {
+    type: 'object',
+    description: 'One immutable line in the credit ledger. `amount` is always positive.',
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      bucket: { type: 'string', enum: ['free', 'paid'] },
+      kind: {
+        type: 'string',
+        examples: ['free_trial_grant', 'usage', 'manual_grant', 'manual_deduction', 'purchase'],
+      },
+      amount: { type: 'integer' },
+      balanceAfter: { type: 'integer' },
+      reason: { type: ['string', 'null'] },
+      referenceType: { type: ['string', 'null'] },
+      referenceId: { type: ['string', 'null'] },
+      actorUserId: { type: ['string', 'null'], format: 'uuid' },
+      createdAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  BillingSettings: {
+    type: 'object',
+    properties: {
+      configured: { type: 'boolean' },
+      paymentInstructions: { type: ['string', 'null'] },
+      qrCodeUrl: {
+        type: ['string', 'null'],
+        description: 'An https URL or a data URL for the payment QR the customer scans.',
+      },
+      paymentMethodLabel: { type: ['string', 'null'] },
+      currency: { type: 'string' },
     },
   },
 
@@ -993,6 +1119,567 @@ export function buildOpenApiSpec(options: OpenApiOptions): OpenApiDocument {
         },
       },
     },
+    /* ------------------------------------------------- customer credits */
+    '/api/credits': {
+      get: {
+        tags: ['Credits'],
+        summary: 'Your approval status, both credit pools, packages and payment history',
+        description:
+          'The single document the credits page renders. Grouped into one ' +
+          'response so the balance, the status and the paywall cannot disagree ' +
+          'with each other on screen.',
+        security: SESSION_SECURITY,
+        responses: {
+          200: {
+            description: 'Credits overview.',
+            ...json({
+              type: 'object',
+              properties: {
+                account: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    name: { type: 'string' },
+                    email: { type: 'string', format: 'email' },
+                    status: { type: 'string', enum: ['pending', 'active', 'suspended', 'rejected'] },
+                    role: { type: 'string', enum: ['customer', 'admin'] },
+                    apiAccess: {
+                      type: 'object',
+                      description:
+                        'Whether this account can currently make API calls, and why ' +
+                        'not if it cannot.',
+                      properties: {
+                        allowed: { type: 'boolean' },
+                        reason: {
+                          type: ['string', 'null'],
+                          enum: ['awaiting_approval', 'account_rejected', 'account_suspended', 'credits_exhausted', null],
+                        },
+                      },
+                    },
+                  },
+                },
+                balance: { $ref: '#/components/schemas/CreditBalance' },
+                packages: { type: 'array', items: { $ref: '#/components/schemas/CreditPackage' } },
+                billing: { $ref: '#/components/schemas/BillingSettings' },
+                payments: { type: 'array', items: { $ref: '#/components/schemas/PaymentRequest' } },
+              },
+            }),
+          },
+          401: errorResponse('Authentication required.'),
+        },
+      },
+    },
+    '/api/credits/ledger': {
+      get: {
+        tags: ['Credits'],
+        summary: 'Your credit ledger',
+        security: SESSION_SECURITY,
+        parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer', default: 100, maximum: 500 } }],
+        responses: {
+          200: {
+            description: 'Ledger entries, newest first.',
+            ...json({
+              type: 'object',
+              properties: {
+                entries: { type: 'array', items: { $ref: '#/components/schemas/LedgerEntry' } },
+              },
+            }),
+          },
+        },
+      },
+    },
+    '/api/credits/billing': {
+      get: {
+        tags: ['Credits'],
+        summary: 'Payment method and packages',
+        description:
+          'What the paywall needs to render: the QR to scan, the amount and the ' +
+          'instructions. `configured` is false when the operator has not set a QR, ' +
+          'which is a normal state rather than an error.',
+        security: SESSION_SECURITY,
+        responses: {
+          200: {
+            description: 'Billing settings and active packages.',
+            ...json({
+              type: 'object',
+              properties: {
+                billing: { $ref: '#/components/schemas/BillingSettings' },
+                packages: { type: 'array', items: { $ref: '#/components/schemas/CreditPackage' } },
+              },
+            }),
+          },
+        },
+      },
+    },
+    '/api/credits/payments': {
+      get: {
+        tags: ['Credits'],
+        summary: 'Your payment history',
+        security: SESSION_SECURITY,
+        responses: {
+          200: {
+            description: 'Your payment requests, newest first.',
+            ...json({
+              type: 'object',
+              properties: {
+                payments: { type: 'array', items: { $ref: '#/components/schemas/PaymentRequest' } },
+              },
+            }),
+          },
+        },
+      },
+      post: {
+        tags: ['Credits'],
+        summary: 'Submit a payment claim',
+        description:
+          'Records a claim for a human to verify. **This grants no credits.** The ' +
+          'price and credit count are read from the package on the server, so they ' +
+          'cannot be influenced by anything sent here; the body carries only which ' +
+          'package was bought, the transaction reference, and a screenshot.\n\n' +
+          'The confirmed email is compared against the address on your ACCOUNT, not ' +
+          'against anything in the body, which is what makes retyping it an identity ' +
+          'check rather than a formality. Requires an approved, active account.',
+        security: SESSION_SECURITY,
+        requestBody: {
+          required: true,
+          ...json({
+            type: 'object',
+            required: ['packageId', 'reference', 'confirmedEmail'],
+            properties: {
+              packageId: { type: 'string', format: 'uuid' },
+              reference: {
+                type: 'string',
+                minLength: 4,
+                maxLength: 160,
+                description: 'The reference from your payment. Unique per customer.',
+              },
+              confirmedEmail: { type: 'string', format: 'email' },
+              receiptDataUrl: {
+                type: 'string',
+                description: 'Optional PNG/JPEG/WebP as a data URL, for a payment screenshot.',
+              },
+            },
+          }),
+        },
+        responses: {
+          201: {
+            description: 'Claim recorded with status `pending`. No credits have been added.',
+            ...json({
+              type: 'object',
+              properties: {
+                payment: { $ref: '#/components/schemas/PaymentRequest' },
+                message: { type: 'string' },
+              },
+            }),
+          },
+          400: errorResponse('Validation failed, or the confirmed email does not match your account.'),
+          403: errorResponse('Your account is not approved, so it cannot submit a payment.'),
+          409: errorResponse('A payment with this reference has already been submitted.'),
+        },
+      },
+    },
+
+    /* ----------------------------------------------- admin credit surface */
+    '/api/admin/credits/customers': {
+      get: {
+        tags: ['Admin credits'],
+        summary: 'List customers with their credit position',
+        security: SESSION_SECURITY,
+        parameters: [
+          { name: 'limit', in: 'query', schema: { type: 'integer', default: 100, maximum: 500 } },
+          { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
+          {
+            name: 'q',
+            in: 'query',
+            description: 'Case-insensitive match on name or email.',
+            schema: { type: 'string', maxLength: 120 },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Customers, each with both balances and a short activity tail.',
+            ...json({ type: 'object' }),
+          },
+          403: errorResponse('Admin only.'),
+        },
+      },
+    },
+    '/api/admin/credits/customers/{id}': {
+      get: {
+        tags: ['Admin credits'],
+        summary: 'One account in full: status, both pools, ledger and payments',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        responses: {
+          200: { description: 'Account detail.', ...json({ type: 'object' }) },
+          403: errorResponse('Admin only.'),
+          404: errorResponse('No such account.'),
+        },
+      },
+    },
+    '/api/admin/credits/customers/{id}/approve': {
+      post: {
+        tags: ['Admin credits'],
+        summary: 'Approve an account and grant the one-time free trial',
+        description:
+          'Activation and the free trial happen in one transaction, so an account ' +
+          'is never active without its grant. The trial is granted exactly once per ' +
+          'customer: repeating this call is a replay that adds nothing further, and ' +
+          'the response reports `alreadyTrialed` so the caller can say so.\n\n' +
+          'An admin cannot approve themselves.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        requestBody: { ...json({ type: 'object', properties: { note: { type: ['string', 'null'] } } }) },
+        responses: {
+          200: {
+            description: 'Approved, with the resulting balance.',
+            ...json({
+              type: 'object',
+              properties: {
+                balance: { $ref: '#/components/schemas/CreditBalance' },
+                alreadyApproved: { type: 'boolean' },
+                alreadyTrialed: { type: 'boolean' },
+                trialTokens: { type: 'integer' },
+              },
+            }),
+          },
+          403: errorResponse('Admin only.'),
+          409: errorResponse('You cannot change your own approval status.'),
+        },
+      },
+    },
+    '/api/admin/credits/customers/{id}/reject': {
+      post: {
+        tags: ['Admin credits'],
+        summary: 'Reject an applicant',
+        description: 'No credits are added and any existing balances are kept.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        requestBody: { ...json({ type: 'object', properties: { note: { type: ['string', 'null'] } } }) },
+        responses: {
+          200: { description: 'Rejected.', ...json({ type: 'object' }) },
+          403: errorResponse('Admin only.'),
+          409: errorResponse('You cannot change your own approval status.'),
+        },
+      },
+    },
+    '/api/admin/credits/customers/{id}/status': {
+      post: {
+        tags: ['Admin credits'],
+        summary: 'Suspend or reactivate an account',
+        description:
+          'Separate from approve/reject because a suspension is reversible. Neither ' +
+          'path touches credits, so an account can be suspended and reactivated ' +
+          'without the one-time trial ever being granted again.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        requestBody: {
+          required: true,
+          ...json({
+            type: 'object',
+            required: ['status'],
+            properties: { status: { type: 'string', enum: ['active', 'suspended'] } },
+          }),
+        },
+        responses: {
+          200: { description: 'Status changed.', ...json({ type: 'object' }) },
+          403: errorResponse('Admin only.'),
+        },
+      },
+    },
+    '/api/admin/credits/customers/{id}/adjust': {
+      post: {
+        tags: ['Admin credits'],
+        summary: 'Manually add or deduct credits',
+        description:
+          'A reason is required and the entry is written to the immutable ledger ' +
+          'naming you as the actor. Free and paid are adjusted independently so ' +
+          'correcting a trial over-grant does not disturb purchased balances. A ' +
+          'deduction larger than the pool is refused rather than allowed to go ' +
+          'negative.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        requestBody: {
+          required: true,
+          ...json({
+            type: 'object',
+            required: ['bucket', 'direction', 'amount', 'reason'],
+            properties: {
+              bucket: { type: 'string', enum: ['free', 'paid'] },
+              direction: { type: 'string', enum: ['add', 'deduct'] },
+              amount: { type: 'integer', minimum: 1 },
+              reason: { type: 'string', minLength: 3, maxLength: 500 },
+            },
+          }),
+        },
+        responses: {
+          200: { description: 'Adjusted.', ...json({ type: 'object' }) },
+          403: errorResponse('Admin only.'),
+          409: errorResponse('The account does not have that many credits to deduct.'),
+        },
+      },
+    },
+    '/api/admin/credits/ledger': {
+      get: {
+        tags: ['Admin credits'],
+        summary: 'The credit ledger across every account',
+        security: SESSION_SECURITY,
+        parameters: [
+          uuidParam('userId'),
+          { name: 'limit', in: 'query', schema: { type: 'integer', default: 200, maximum: 1000 } },
+        ],
+        responses: {
+          200: {
+            description: 'Entries, newest first.',
+            ...json({
+              type: 'object',
+              properties: {
+                entries: { type: 'array', items: { $ref: '#/components/schemas/LedgerEntry' } },
+              },
+            }),
+          },
+          403: errorResponse('Admin only.'),
+        },
+      },
+    },
+    '/api/admin/credits/packages': {
+      get: {
+        tags: ['Admin credits'],
+        summary: 'List credit packages, including retired ones',
+        security: SESSION_SECURITY,
+        responses: {
+          200: {
+            description: 'Packages.',
+            ...json({
+              type: 'object',
+              properties: {
+                packages: { type: 'array', items: { $ref: '#/components/schemas/CreditPackage' } },
+              },
+            }),
+          },
+          403: errorResponse('Admin only.'),
+        },
+      },
+      post: {
+        tags: ['Admin credits'],
+        summary: 'Create a credit package',
+        security: SESSION_SECURITY,
+        requestBody: {
+          required: true,
+          ...json({
+            type: 'object',
+            required: ['name', 'credits', 'priceMinor'],
+            properties: {
+              name: { type: 'string', maxLength: 80 },
+              description: { type: ['string', 'null'], maxLength: 1000 },
+              credits: {
+                type: 'integer',
+                minimum: 1,
+                description:
+                  'The token grant behind the package. What a customer actually buys ' +
+                  'is `allowedModels`; this is the abuse guard behind it.',
+              },
+              allowedModels: {
+                type: ['array', 'null'],
+                items: { type: 'string' },
+                description:
+                  'Public model names this package grants. Null grants every model, ' +
+                  'which is a different value from an empty array (none).',
+              },
+              imageSupport: {
+                type: 'boolean',
+                default: false,
+                description: 'Whether this package includes image input on chat requests.',
+              },
+              priceMinor: { type: 'integer', minimum: 1, description: 'Minor units, e.g. 89900 = 899.00.' },
+              currency: { type: 'string', default: 'INR' },
+              sortOrder: { type: 'integer', default: 0 },
+              active: { type: 'boolean', default: true },
+            },
+          }),
+        },
+        responses: {
+          201: { description: 'Created.', ...json({ type: 'object' }) },
+          400: errorResponse('Validation failed.'),
+          403: errorResponse('Admin only.'),
+        },
+      },
+    },
+    '/api/admin/credits/packages/{id}': {
+      patch: {
+        tags: ['Admin credits'],
+        summary: 'Update or retire a credit package',
+        description:
+          'Edits apply to future purchases. Payments already submitted keep the ' +
+          'price and credit count captured when they were made, so changing a ' +
+          'package can never alter what an existing claim is worth.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        requestBody: {
+          required: true,
+          ...json({ type: 'object' }),
+        },
+        responses: {
+          200: { description: 'Updated.', ...json({ type: 'object' }) },
+          403: errorResponse('Admin only.'),
+          404: errorResponse('No such package.'),
+        },
+      },
+    },
+    '/api/admin/credits/billing': {
+      get: {
+        tags: ['Admin credits'],
+        summary: 'Read the payment method configuration',
+        security: SESSION_SECURITY,
+        responses: {
+          200: { description: 'Billing settings.', ...json({ type: 'object' }) },
+          403: errorResponse('Admin only.'),
+        },
+      },
+      patch: {
+        tags: ['Admin credits'],
+        summary: 'Set the payment QR code, instructions and currency',
+        description:
+          'A QR may be an https URL or a PNG/JPEG/WebP data URL. Plain http is ' +
+          'rejected: a payment QR fetched over it can be swapped in transit, and ' +
+          'the customer who scans the swapped one pays the wrong person.\n\n' +
+          'Send `qrCodeUrl: null` to remove the QR; omit the field to leave it ' +
+          'unchanged.',
+        security: SESSION_SECURITY,
+        requestBody: {
+          ...json({
+            type: 'object',
+            properties: {
+              paymentInstructions: { type: ['string', 'null'], maxLength: 4000 },
+              qrCodeUrl: { type: ['string', 'null'] },
+              paymentMethodLabel: { type: ['string', 'null'], maxLength: 120 },
+              currency: { type: 'string' },
+            },
+          }),
+        },
+        responses: {
+          200: { description: 'Saved.', ...json({ type: 'object' }) },
+          400: errorResponse('Validation failed, or the upload is not a valid image.'),
+          403: errorResponse('Admin only.'),
+        },
+      },
+    },
+    '/api/admin/credits/payments': {
+      get: {
+        tags: ['Admin credits'],
+        summary: 'List payment requests with customer details',
+        security: SESSION_SECURITY,
+        parameters: [
+          {
+            name: 'status',
+            in: 'query',
+            schema: { type: 'string', enum: ['pending', 'approved', 'rejected'] },
+          },
+          { name: 'limit', in: 'query', schema: { type: 'integer', default: 100, maximum: 500 } },
+        ],
+        responses: {
+          200: {
+            description: 'Payment requests, newest first.',
+            ...json({ type: 'object' }),
+          },
+          403: errorResponse('Admin only.'),
+        },
+      },
+    },
+    '/api/admin/credits/payments/{id}/receipt': {
+      get: {
+        tags: ['Admin credits'],
+        summary: 'The submitted payment screenshot',
+        description: 'Served as an image with `no-store`, because it is a customer’s payment proof.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        responses: {
+          200: { description: 'The image.', content: { 'image/*': { schema: { type: 'string', format: 'binary' } } } },
+          403: errorResponse('Admin only.'),
+          404: errorResponse('No receipt was submitted for this payment.'),
+        },
+      },
+    },
+    '/api/admin/credits/payments/{id}/approve': {
+      post: {
+        tags: ['Admin credits'],
+        summary: 'Approve a payment and allocate its credits',
+        description:
+          'Allocation and the status change are one transaction guarded on ' +
+          '`status = pending`, so a double-click, a retried request, or two admins ' +
+          'clicking at once all resolve to exactly one allocation. A repeat returns ' +
+          '`replayed: true` and adds nothing further.\n\n' +
+          'The amount added is the value captured on the payment when it was ' +
+          'submitted, not the package’s current price.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        requestBody: { ...json({ type: 'object', properties: { note: { type: ['string', 'null'] } } }) },
+        responses: {
+          200: {
+            description: 'Approved, with the resulting balance.',
+            ...json({
+              type: 'object',
+              properties: {
+                payment: { $ref: '#/components/schemas/PaymentRequest' },
+                balance: { $ref: '#/components/schemas/CreditBalance' },
+                replayed: { type: 'boolean' },
+              },
+            }),
+          },
+          403: errorResponse('Admin only.'),
+          404: errorResponse('No such payment.'),
+        },
+      },
+    },
+    '/api/admin/credits/payments/{id}/reject': {
+      post: {
+        tags: ['Admin credits'],
+        summary: 'Reject a payment',
+        description: 'No credits are added. A reason is required so the customer can be told why.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        requestBody: {
+          required: true,
+          ...json({
+            type: 'object',
+            required: ['note'],
+            properties: { note: { type: 'string', minLength: 1, maxLength: 1000 } },
+          }),
+        },
+        responses: {
+          200: { description: 'Rejected.', ...json({ type: 'object' }) },
+          400: errorResponse('A reason is required when rejecting a payment.'),
+          403: errorResponse('Admin only.'),
+          409: errorResponse('This payment has already been reviewed.'),
+        },
+      },
+    },
+    '/api/admin/credits/payments/{id}/telegram-retry': {
+      post: {
+        tags: ['Admin credits'],
+        summary: 'Resend the Telegram notification for a payment',
+        description:
+          'Re-reads the stored payment and receipt, so it works for a submission ' +
+          'the bot never received. The claim does not depend on the notification, ' +
+          'and a failure here never affects the payment itself.',
+        security: SESSION_SECURITY,
+        parameters: [uuidParam('id')],
+        responses: {
+          200: {
+            description: 'Delivery outcome.',
+            ...json({
+              type: 'object',
+              properties: {
+                sent: { type: 'boolean' },
+                error: { type: ['string', 'null'] },
+              },
+            }),
+          },
+          403: errorResponse('Admin only.'),
+        },
+      },
+    },
+
     '/api/admin/metrics': {
       get: {
         tags: ['Admin'],
@@ -1022,8 +1709,13 @@ export function buildOpenApiSpec(options: OpenApiOptions): OpenApiDocument {
         'session cookie set at sign-in. Inference routes use an API key as a bearer ' +
         'token.\n\n' +
         '**Tiers.** Send `model` as one of: ' + TIER_LIST + '. The tier you ask for is ' +
-        'the tier that is served and the name that comes back; the provider’s own ' +
-        'model naming is not part of this contract.',
+        'the tier that is served and the name that comes back; the provider\u2019s own ' +
+        'model naming is not part of this contract.\n\n' +
+        '**Credits.** A new account starts `pending` and cannot call the API until an ' +
+        'administrator approves it, which is also when the one-time free trial is ' +
+        'granted. Credits are token units tracked as two separate pools: the free ' +
+        'trial and anything purchased. When both are empty, calls are refused with ' +
+        '`credits_exhausted` until a payment is submitted and verified.',
     },
     servers: [{ url: serverUrl, description: 'This deployment' }],
     tags: [
@@ -1033,7 +1725,19 @@ export function buildOpenApiSpec(options: OpenApiOptions): OpenApiDocument {
       { name: 'API keys', description: 'Key lifecycle. Secrets are shown once, on creation.' },
       { name: 'Models', description: 'The catalogue a key may call.' },
       { name: 'Usage', description: 'Token and request reporting.' },
+      {
+        name: 'Credits',
+        description:
+          'Balances, the free trial and pay-as-you-go purchases. Credits are ' +
+          'token units, not money, and free and paid pools are never merged.',
+      },
       { name: 'Admin', description: 'Operator surface. Admin role required.' },
+      {
+        name: 'Admin credits',
+        description:
+          'Approval, manual adjustments, payment verification and the package ' +
+          'catalogue. Every price and credit amount here is authoritative.',
+      },
       { name: 'System', description: 'Health, version and metrics.' },
     ],
     paths,

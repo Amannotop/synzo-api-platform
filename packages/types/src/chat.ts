@@ -22,16 +22,61 @@ export interface ToolCall {
   function: { name: string; arguments: string };
 }
 
+/**
+ * One piece of a multi-part message.
+ *
+ * OpenAI clients send `content` as a bare string for text-only turns and as an
+ * array of these when an image is attached. Both forms stay valid: the
+ * union keeps a text-only client byte-for-byte unchanged, and only a client
+ * that actually sends an image pays for the extra shape.
+ */
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | {
+      type: 'image_url';
+      image_url: {
+        /**
+         * A `data:` URL or an `https://` URL. Plain `http` is refused for a
+         * remote image for the same reason a payment QR over http is: a URL
+         * swapped in transit sends the model something else entirely.
+         */
+        url: string;
+        /** Client hint forwarded to the provider. */
+        detail?: 'auto' | 'low' | 'high';
+      };
+    };
+
 export interface ChatMessage {
   role: ChatRole;
   /**
    * Empty for an assistant turn that only requests tool calls. OpenAI clients
    * send `content: null` there, so the type admits null for round-tripping.
+   *
+   * An array of parts is only ever produced by a request that carried an
+   * image, and is normalised back to a plain string whenever it did not.
    */
-  content: string | null;
+  content: string | ChatContentPart[] | null;
   name?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+}
+
+/**
+ * How many images a request carries, across the whole conversation.
+ *
+ * Counted over every message rather than the last turn, because a client
+ * replaying history would otherwise get a fresh budget each turn and smuggle an
+ * unbounded number of images into one billed request. Matches how the request
+ * schema counts them, so the number a customer is told they exceeded is the same
+ * one that was counted against their plan.
+ */
+export function countImageParts(messages: readonly ChatMessage[]): number {
+  let n = 0;
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const part of m.content) if (part.type === 'image_url') n += 1;
+  }
+  return n;
 }
 
 export interface ChatCompletionRequest {

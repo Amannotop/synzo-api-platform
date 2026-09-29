@@ -5,3 +5,4 @@ export * from './request.repository.js';
 export * from './model.repository.js';
 export * from './session.repository.js';
 export * from './audit.repository.js';
+export * from './credit.repository.js';

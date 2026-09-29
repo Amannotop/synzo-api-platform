@@ -3,4 +3,10 @@ export interface ValidationLimits {
   maxMessages: number;
   maxMessageChars: number;
   maxContentTokensHardCap: number;
+  /**
+   * Image input caps. `maxImagesPerRequest` is 0 when the operator has turned
+   * image input off entirely, in which case any image part is rejected.
+   */
+  maxImagesPerRequest: number;
+  maxImageBytes: number;
 }

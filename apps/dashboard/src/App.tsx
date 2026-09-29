@@ -7,12 +7,14 @@ import ApiKeys from './pages/ApiKeys';
 import Projects from './pages/Projects';
 import Models from './pages/Models';
 import Usage from './pages/Usage';
+import Credits from './pages/Credits';
 import Requests from './pages/Requests';
 import Documentation from './pages/Documentation';
 import Playground from './pages/Playground';
 import Operations from './pages/Operations';
 import Settings from './pages/Settings';
 import Admin from './pages/Admin';
+import AdminCredits from './pages/AdminCredits';
 import NotFound from './pages/NotFound';
 import ResetPassword from './pages/ResetPassword';
 import VerifyEmail from './pages/VerifyEmail';
@@ -67,6 +69,7 @@ export default function App() {
         <Route path="/projects" element={<Projects />} />
         <Route path="/models" element={<Models />} />
         <Route path="/usage" element={<Usage />} />
+        <Route path="/credits" element={<Credits />} />
         <Route path="/requests" element={<Requests />} />
         {/* The API serves its own interactive reference at /docs, so the
             hand-written page is now /documentation and links across to it.
@@ -79,6 +82,14 @@ export default function App() {
           element={
             <RequireAdmin>
               <Admin />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/admin/credits"
+          element={
+            <RequireAdmin>
+              <AdminCredits />
             </RequireAdmin>
           }
         />

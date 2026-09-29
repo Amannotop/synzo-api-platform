@@ -31,7 +31,12 @@ import { createMetrics, type Metrics } from './metrics/registry.js';
 import { registerMetricsRoutes } from './routes/metrics.routes.js';
 import { registerDocsRoutes } from './routes/docs.routes.js';
 import { registerStaticRoutes } from './routes/static.routes.js';
+import { registerCreditRoutes } from './routes/credits.routes.js';
 import { RetentionService } from './services/retention.service.js';
+import { CreditRepository } from './repositories/credit.repository.js';
+import { CreditService } from './services/credit.service.js';
+import { CreditSweeper } from './services/credit-sweeper.service.js';
+import { TelegramService } from './services/telegram.service.js';
 
 export interface AppDeps {
   config: AppConfig;
@@ -45,6 +50,14 @@ export interface BuiltApp {
   health: ProviderHealthMonitor;
   metrics: Metrics;
   retention: RetentionService;
+  credits: CreditRepository;
+  creditService: CreditService;
+  /**
+   * The stale-reservation reclaim loop, exposed so an operator or a test can
+   * drive a sweep directly rather than waiting on its interval.
+   */
+  creditSweeper: CreditSweeper;
+  telegram: TelegramService;
 }
 
 /**
@@ -135,6 +148,25 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
         }
       : false,
     crossOriginEmbedderPolicy: false,
+    /**
+     * No Permissions-Policy is set here, and this is a deliberate omission
+     * rather than an oversight.
+     *
+     * The options above were written against an older helmet that accepted a
+     * `permissionsPolicy` key. The installed helmet is 8.3.0, whose
+     * `HelmetOptions` has no such key at any level, so passing it was a
+     * type error and — at runtime — silently ignored. The documented intent was
+     * to switch off `camera`, `microphone`, `geolocation` and friends for this
+     * document and all nested frames, with `fullscreen` the single allowance
+     * (Swagger UI's "Try it out" is more usable fullscreen, and a documentation
+     * page is not a meaningful risk from it).
+     *
+     * That header is worth having on a credentialed, cookie-authenticated
+     * surface that renders untrusted strings. Emitting it means setting the
+     * header explicitly in an onSend hook, which is a change of mechanism
+     * rather than a one-line fix, so it is left as a known gap rather than
+     * smuggled in here.
+     */
   });
 
   registerErrorHandler(app, logger);
@@ -147,6 +179,7 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
   const models = new ModelRepository(db);
   const sessions = new SessionRepository(db);
   const audit = new AuditRepository(db);
+  const credits = new CreditRepository(db, config);
 
   // Services
   const providers = new ProviderRegistry(config);
@@ -174,6 +207,8 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
       }
     },
   });
+  const creditService = new CreditService({ config, logger, credits });
+  const telegram = new TelegramService({ config, logger });
   const chatService = new ChatService({
     config,
     logger,
@@ -182,6 +217,10 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
     requestsRepo,
     rateLimiter,
     metrics,
+    // Credit enforcement is passed in rather than imported, so the chat
+    // service's dependency list stays explicit and a caller that only
+    // exercises model resolution can still build it without a balance table.
+    credits: creditService,
   });
 
   // Attach the authenticated session to every request before routing.
@@ -199,6 +238,7 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
     redis,
     rateLimiter,
     accountTokens,
+    credits,
   });
   await registerAccountRoutes(app, {
     config,
@@ -210,7 +250,18 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
     redis,
   });
   await registerCustomerRoutes(app, { config, projects, apiKeys, requestsRepo, users, audit, models });
-  await registerAdminRoutes(app, { users, models, requestsRepo, audit, health, metrics });
+  await registerCreditRoutes(app, { config, credits, telegram, users, audit });
+  await registerAdminRoutes(app, {
+    config,
+    users,
+    models,
+    requestsRepo,
+    audit,
+    health,
+    metrics,
+    credits,
+    telegram,
+  });
   await registerMetricsRoutes(app, { config, metrics, health });
   await registerDocsRoutes(app, { config });
 
@@ -226,6 +277,16 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
     accountTokens,
   });
   retention.start();
+
+  /**
+   * Reclaims reservations orphaned by a crash. Without this a lost claim
+   * freezes the customer's tokens indefinitely: the balance is still there, the
+   * dashboard still shows it, and the account quietly stops working. Only
+   * claims older than the service's own staleness window are touched, so a
+   * live request is never robbed.
+   */
+  const creditSweeper = new CreditSweeper({ config, logger, credits: creditService });
+  creditSweeper.start();
 
   // Request/response logging that is guaranteed not to include secrets.
   app.addHook('onResponse', async (request, reply) => {
@@ -252,7 +313,8 @@ export async function buildApp(deps: AppDeps): Promise<BuiltApp> {
 
   app.addHook('onClose', async () => {
     retention.stop();
+    creditSweeper.stop();
   });
 
-  return { app, logger, health, metrics, retention };
+  return { app, logger, health, metrics, retention, credits, creditService, creditSweeper, telegram };
 }

@@ -276,6 +276,24 @@ export class RateLimitService {
    * "used" figure and lose one increment. The TTL is stamped when the counter
    * is created, which is what makes the counter roll over at UTC midnight.
    */
+  /**
+   * Claims image allowance, or declines without consuming.
+   *
+   * Returns the new total on success and -1 on decline, so the caller tests a
+   * single number. A negative result means the key was never touched.
+   */
+  private static readonly IMAGE_CLAIM_LUA = `
+    local key = KEYS[1]
+    local count = tonumber(ARGV[1])
+    local allowance = tonumber(ARGV[2])
+    local ttl = tonumber(ARGV[3])
+    local used = tonumber(redis.call('GET', key) or '0')
+    if used + count > allowance then return -1 end
+    local now = redis.call('INCRBY', key, count)
+    if used == 0 then redis.call('EXPIRE', key, ttl) end
+    return now
+  `;
+
   private static readonly TOKEN_ADD_LUA = `
     local key = KEYS[1]
     local amount = tonumber(ARGV[1])
@@ -284,6 +302,65 @@ export class RateLimitService {
     if used == amount then redis.call('EXPIRE', key, ttl) end
     return used
   `;
+
+  /**
+   * Claims part of a plan's image allowance, or reports that there is none left.
+   *
+   * The allowance is a TOTAL for the subscription period, not a per-request
+   * cap: a ₹199 plan that includes 3 images has three images in seven days, not
+   * three per call. So this is a counter with a lifetime, not a comparison
+   * against a single request.
+   *
+   * Check and increment happen in one script on purpose. A read followed by an
+   * INCRBY in application code would let two concurrent requests each observe
+   * "2 used, 3 allowed", both conclude they fit, and together spend 4 of 3.
+   * Decrementing on refusal has the same race in reverse. Inside Lua the whole
+   * decision is atomic, and the counter is left untouched when the claim fails,
+   * so a refused request costs the customer nothing.
+   *
+   * Returns true when the claim succeeded.
+   *
+   * `ttlSeconds` is the time left on the plan. It is passed rather than derived
+   * here because the period is the subscription, not a day boundary, and this
+   * service has no business knowing when a customer's plan ends. The key is
+   * only given a TTL when it is created, so a renewal that extends the period
+   * cannot shorten a counter that is already running.
+   */
+  async consumeImageAllowance(input: {
+    userId: string;
+    count: number;
+    allowance: number;
+    ttlSeconds: number;
+  }): Promise<boolean> {
+    if (input.count <= 0) return true;
+    const used = (await this.redis.eval(
+      RateLimitService.IMAGE_CLAIM_LUA,
+      1,
+      `img:${input.userId}`,
+      String(input.count),
+      String(input.allowance),
+      String(Math.max(1, Math.floor(input.ttlSeconds))),
+    )) as number;
+    return used >= 0;
+  }
+
+  /**
+   * Hands image allowance back after a request that was claimed but never
+   * served, so an upstream failure does not permanently consume it.
+   *
+   * Idempotence is not claimed here: the caller only calls this for a claim it
+   * made in the same request, and a double release would over-credit. The credit
+   * reservation is the pattern that does need idempotence, and it has it.
+   */
+  async releaseImageAllowance(userId: string, count: number): Promise<void> {
+    if (count <= 0) return;
+    try {
+      await this.redis.decrby(`img:${userId}`, count);
+    } catch {
+      // Best effort. An over-credit from a failed refund is a smaller problem
+      // than failing the customer's request over it.
+    }
+  }
 
   /* ------------------------------------------------------------- admission */
 

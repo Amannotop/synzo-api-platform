@@ -10,8 +10,13 @@ import type { RequestRepository } from '../repositories/request.repository.js';
 import type { AuditRepository } from '../repositories/audit.repository.js';
 import type { ProviderHealthMonitor } from '../services/provider-health.service.js';
 import type { Metrics } from '../metrics/registry.js';
+import type { AppConfig } from '@synzo/config';
+import type { CreditRepository } from '../repositories/credit.repository.js';
+import type { TelegramService } from '../services/telegram.service.js';
+import { registerAdminCreditRoutes } from './admin-credits.routes.js';
 
 interface AdminDeps {
+  config: AppConfig;
   users: UserRepository;
   models: ModelRepository;
   requestsRepo: RequestRepository;
@@ -19,6 +24,9 @@ interface AdminDeps {
   health: ProviderHealthMonitor;
   /** The in-process registry, for the live operational summary. */
   metrics: Metrics;
+  /** Credit, payment and billing management. */
+  credits: CreditRepository;
+  telegram: TelegramService;
 }
 
 function fail(issues: { message: string; path: (string | number)[] }[]): never {
@@ -70,6 +78,20 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
   await app.register(async (admin) => {
     admin.addHook('preHandler', async (request) => {
       requireAdmin(request);
+    });
+
+    /**
+     * The credit/payment surface is registered INSIDE this scope, so it
+     * inherits the `requireAdmin` hook above. Registering it at the top level
+     * would leave it reachable by any signed-in customer, which is exactly the
+     * privilege-escalation the spec is about.
+     */
+    await registerAdminCreditRoutes(admin, {
+      config: deps.config,
+      credits: deps.credits,
+      telegram: deps.telegram,
+      users: deps.users,
+      audit: deps.audit,
     });
 
     await registerRoutes(admin, deps);

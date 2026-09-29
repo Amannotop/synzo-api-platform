@@ -165,3 +165,147 @@ export interface ProviderHealthEntry {
   checkedAt: string;
   detail?: string;
 }
+
+/* ------------------------------------------------------------------ credits */
+
+export type AccountStatus = 'active' | 'suspended' | 'pending' | 'rejected';
+export type PaymentStatus = 'pending' | 'approved' | 'rejected';
+
+/**
+ * Why API access is currently unavailable.
+ *
+ * `null` means access is allowed. The dashboard renders a different call to
+ * action per reason, because "waiting for review" and "buy more credits" are
+ * different problems and showing the paywall to an unapproved account is
+ * worse than showing them nothing.
+ */
+export type AccessReason = 'awaiting_approval' | 'account_rejected' | 'account_suspended' | 'credits_exhausted' | null;
+
+/**
+ * The two credit pools, kept separate on purpose. `totalRemaining` is what the
+ * customer can actually spend: the balance minus anything held by requests
+ * currently in flight.
+ */
+export interface CreditBalance {
+  freeGranted: number;
+  freeUsed: number;
+  freeRemaining: number;
+  freeReserved: number;
+  paidGranted: number;
+  paidUsed: number;
+  paidRemaining: number;
+  paidReserved: number;
+  totalRemaining: number;
+  freeTrialGrantedAt: string | null;
+  hasFreeTrial: boolean;
+}
+
+export interface CreditPackage {
+  id: string;
+  name: string;
+  description: string | null;
+  /** The token abuse guard behind the package. Not the headline any more. */
+  credits: number;
+  /**
+   * Which models the package grants. `null` means every model; an array is an
+   * exact list, so `[]` would be a deliberate lockout.
+   */
+  allowedModels: string[] | null;
+  /**
+   * Images this package includes, as a TOTAL for the subscription period rather
+   * than a per-request cap. 0 = none, a number = that many, null = unlimited.
+   */
+  imageLimit: number | null;
+  /** Term in days. null means the purchase does not expire. */
+  durationDays: number | null;
+  /** Minor units, so money stays integral: 89900 is 899.00. */
+  priceMinor: number;
+  currency: string;
+  sortOrder: number;
+  active: boolean;
+}
+
+export interface BillingSettings {
+  configured: boolean;
+  paymentInstructions: string | null;
+  qrCodeUrl: string | null;
+  paymentMethodLabel: string | null;
+  currency: string;
+}
+
+export interface PaymentRequest {
+  id: string;
+  packageId: string | null;
+  packageName: string;
+  credits: number;
+  amountMinor: number;
+  currency: string;
+  reference: string;
+  email: string;
+  status: PaymentStatus | string;
+  reviewNote: string | null;
+  receiptMime: string | null;
+  receiptBytes: number | null;
+  hasReceipt?: boolean;
+  createdAt: string;
+  reviewedAt: string | null;
+  telegramStatus?: string | null;
+}
+
+export interface CreditAccount {
+  id: string;
+  name: string;
+  email: string;
+  status: AccountStatus | string;
+  role: string;
+  apiAccess: { allowed: boolean; reason: AccessReason };
+}
+
+export interface LedgerEntry {
+  id: string;
+  bucket: 'free' | 'paid' | string;
+  kind: string;
+  /** Always positive; `bucket` and the entry's direction say which way it moved. */
+  amount: number;
+  balanceAfter: number;
+  reason: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  actorUserId: string | null;
+  createdAt: string;
+}
+
+export interface CreditsOverview {
+  account: CreditAccount;
+  balance: CreditBalance;
+  packages: CreditPackage[];
+  billing: BillingSettings;
+  payments: PaymentRequest[];
+}
+
+export interface AdminCreditCustomer {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  status: AccountStatus | string;
+  createdAt: string;
+  balance: CreditBalance;
+  recentLedger: { id: string; bucket: string; kind: string; amount: number; createdAt: string }[];
+}
+
+export interface AdminCustomerList {
+  customers: AdminCreditCustomer[];
+  /** Every account on the platform. */
+  total: number;
+  /** How many accounts the current search found; equals `total` when idle. */
+  matched: number;
+  query: string;
+  limit: number;
+  offset: number;
+}
+
+export interface AdminPaymentRow {
+  payment: PaymentRequest;
+  customer: { id: string; name: string; email: string };
+}
